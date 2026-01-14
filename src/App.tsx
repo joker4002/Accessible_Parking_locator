@@ -17,6 +17,12 @@ type ParkingLotGeometry = {
   polygons: google.maps.LatLngLiteral[][][];
 };
 
+type TravelModeKey = 'DRIVING' | 'TRANSIT' | 'WALKING';
+
+function stripHtml(input: string): string {
+  return input.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export default function App() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
 
@@ -41,6 +47,7 @@ export default function App() {
   const [parkingLotGeometries, setParkingLotGeometries] = useState<Record<string, ParkingLotGeometry>>({});
   const [activeTab, setActiveTab] = useState<'results' | 'lots'>('results');
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
+  const [travelMode, setTravelMode] = useState<TravelModeKey>('DRIVING');
 
   const now = useMemo(() => new Date(), []);
 
@@ -180,8 +187,8 @@ export default function App() {
         setUserPos(next);
         setStatusMsg('Location updated. Showing nearest accessible parking.');
         if (mapRef.current) {
-          mapRef.current.panTo(next);
-          mapRef.current.setZoom(15);
+          mapRef.current.setCenter(next);
+          mapRef.current.setZoom(16);
         }
       },
       (err) => {
@@ -270,7 +277,7 @@ export default function App() {
       {
         origin: userPos,
         destination,
-        travelMode: google.maps.TravelMode.DRIVING,
+        travelMode: google.maps.TravelMode[travelMode],
         provideRouteAlternatives: false
       },
       (result, status) => {
@@ -287,6 +294,60 @@ export default function App() {
     );
   };
 
+  const routeSummary = useMemo(() => {
+    const leg = directions?.routes?.[0]?.legs?.[0];
+    if (!leg) return null;
+
+    const steps = (leg.steps ?? []).map((s) => {
+      const stepAny = s as unknown as {
+        travel_mode?: string;
+        html_instructions?: string;
+        instructions?: string;
+        distance?: { text?: string };
+        duration?: { text?: string };
+        transit?: {
+          num_stops?: number;
+          headsign?: string;
+          line?: {
+            short_name?: string;
+            name?: string;
+            vehicle?: { name?: string };
+          };
+          departure_stop?: { name?: string };
+          arrival_stop?: { name?: string };
+        };
+      };
+
+      const mode = stepAny.travel_mode ?? '';
+      const instructionRaw = stepAny.html_instructions ?? stepAny.instructions ?? '';
+      const instruction = stripHtml(instructionRaw);
+      const distance = stepAny.distance?.text ?? '';
+      const duration = stepAny.duration?.text ?? '';
+
+      const transit = stepAny.transit;
+      const transitSummary = transit
+        ? {
+            vehicle: transit.line?.vehicle?.name,
+            line: transit.line?.short_name ?? transit.line?.name,
+            headsign: transit.headsign,
+            from: transit.departure_stop?.name,
+            to: transit.arrival_stop?.name,
+            stops: transit.num_stops
+          }
+        : null;
+
+      return { mode, instruction, distance, duration, transitSummary };
+    });
+
+    return {
+      distance: leg.distance?.text ?? '',
+      duration: leg.duration?.text ?? '',
+      start: leg.start_address ?? '',
+      end: leg.end_address ?? '',
+      steps
+    };
+  }, [directions]);
+
   return (
     <div className="container">
       <aside className="sidebar" aria-label="Search and results">
@@ -296,7 +357,51 @@ export default function App() {
               <h1>KingstonAccess</h1>
               <p>Accessible parking finder + availability hint</p>
             </div>
+
           </div>
+
+          {routeSummary ? (
+            <div className="card" role="region" aria-label="Navigation directions">
+              <div className="label">Navigation</div>
+              <div className="itemMeta">
+                Distance: {routeSummary.distance || '—'}
+                <br />
+                Time: {routeSummary.duration || '—'}
+              </div>
+
+              <div style={{ height: 10 }} />
+
+              <div className="list" role="list">
+                {routeSummary.steps.map((st, idx) => {
+                  const t = st.transitSummary;
+                  return (
+                    <div key={idx} className="item" role="listitem">
+                      <div className="itemTitle">Step {idx + 1}</div>
+                      <div className="itemMeta">
+                        {t ? (
+                          <>
+                            {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
+                            {t.headsign ? ` toward ${t.headsign}` : ''}
+                            <br />
+                            From: {t.from ?? '—'}
+                            <br />
+                            To: {t.to ?? '—'}
+                            <br />
+                            Stops: {typeof t.stops === 'number' ? t.stops : '—'}
+                            <br />
+                          </>
+                        ) : null}
+                        {st.instruction || '—'}
+                        <br />
+                        {st.distance ? `Distance: ${st.distance}` : null}
+                        {st.duration ? ` • Time: ${st.duration}` : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
 
           <div className="card" role="region" aria-label="Search controls">
             <div className="label" id="search-label">Search</div>
@@ -318,6 +423,19 @@ export default function App() {
               />
               Only show lots with accessible spaces
             </label>
+
+            <div style={{ height: 10 }} />
+
+            <div className="label" id="mode-label">Travel mode</div>
+            <select
+              aria-labelledby="mode-label"
+              value={travelMode}
+              onChange={(e) => setTravelMode(e.target.value as TravelModeKey)}
+            >
+              <option value={'DRIVING'}>Driving</option>
+              <option value={'TRANSIT'}>Transit</option>
+              <option value={'WALKING'}>Walking</option>
+            </select>
 
             <div style={{ height: 10 }} />
 
@@ -465,7 +583,6 @@ export default function App() {
                             Accessible spaces: {handicap}
                           </div>
                         </div>
-                        <div className="chip" aria-label="City dataset">City dataset</div>
                       </div>
 
                       <div style={{ height: 10 }} />
@@ -579,6 +696,23 @@ export default function App() {
                   options={{
                     preserveViewport: true,
                     suppressMarkers: false
+                  }}
+                />
+              ) : null}
+
+              {userPos ? (
+                <MarkerF
+                  key="user-location"
+                  position={userPos}
+                  title="Your location"
+                  icon={{
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 7,
+                    fillColor: '#2563eb',
+                    fillOpacity: 1,
+                    strokeColor: '#ffffff',
+                    strokeOpacity: 1,
+                    strokeWeight: 2
                   }}
                 />
               ) : null}
