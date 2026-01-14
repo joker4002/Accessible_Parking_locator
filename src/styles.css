@@ -78,11 +78,13 @@ a {
   position: sticky;
   top: 0;
   z-index: 5;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent);
+  background: var(--bg);
   backdrop-filter: blur(10px);
   margin: -16px -16px 0;
   padding: 16px;
   padding-bottom: 12px;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.35);
+  border-bottom: 1px solid var(--border);
 }
 
 .sidebarScroll {
