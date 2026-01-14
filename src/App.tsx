@@ -1,8 +1,9 @@
-import { GoogleMap, InfoWindowF, MarkerF, useJsApiLoader } from '@react-google-maps/api';
+import { GoogleMap, InfoWindowF, MarkerF, PolygonF, useJsApiLoader } from '@react-google-maps/api';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { haversineMeters, formatDistance } from './geo';
 import { MOCK_SPOTS } from './mockData';
 import parkingLotsCsv from './Parking_Lot_Areas.csv?raw';
+import parkingLotsGeoJson from './Parking_Lot_Areas.geojson?raw';
 import { parseParkingLotAreas } from './parkingLots';
 import { predictAvailability } from './predict';
 import type { ParkingLotArea, ParkingSpot } from './types';
@@ -10,6 +11,11 @@ import type { ParkingLotArea, ParkingSpot } from './types';
 const DEFAULT_CENTER = { lat: 44.2312, lng: -76.4860 };
 
 type SpotWithDistance = ParkingSpot & { distanceMeters: number };
+
+type ParkingLotGeometry = {
+  // A lot can be MultiPolygon: [polygonIndex][ringIndex][pointIndex]
+  polygons: google.maps.LatLngLiteral[][][];
+};
 
 export default function App() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
@@ -31,6 +37,7 @@ export default function App() {
   const [parkingLotsError, setParkingLotsError] = useState<string | null>(null);
   const [selectedParkingLotId, setSelectedParkingLotId] = useState<string | null>(null);
   const [parkingLotMarkers, setParkingLotMarkers] = useState<Record<string, { lat: number; lng: number }>>({});
+  const [parkingLotGeometries, setParkingLotGeometries] = useState<Record<string, ParkingLotGeometry>>({});
 
   const now = useMemo(() => new Date(), []);
 
@@ -73,6 +80,42 @@ export default function App() {
       setParkingLotsError(null);
     } catch {
       setParkingLotsError('Could not load Parking_Lot_Areas.csv');
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(parkingLotsGeoJson) as {
+        type: 'FeatureCollection';
+        features: Array<{
+          type: 'Feature';
+          properties: Record<string, unknown>;
+          geometry:
+            | { type: 'Polygon'; coordinates: number[][][] }
+            | { type: 'MultiPolygon'; coordinates: number[][][][] };
+        }>;
+      };
+
+      const next: Record<string, ParkingLotGeometry> = {};
+
+      for (const f of parsed.features) {
+        const globalId = (f.properties?.GLOBALID as string | undefined) ?? undefined;
+        if (!globalId) continue;
+
+        const toLatLng = (pt: number[]): google.maps.LatLngLiteral => ({ lat: pt[1], lng: pt[0] });
+
+        if (f.geometry.type === 'Polygon') {
+          const rings = f.geometry.coordinates.map((ring) => ring.map(toLatLng));
+          next[globalId] = { polygons: [rings] };
+        } else if (f.geometry.type === 'MultiPolygon') {
+          const polygons = f.geometry.coordinates.map((poly) => poly.map((ring) => ring.map(toLatLng)));
+          next[globalId] = { polygons };
+        }
+      }
+
+      setParkingLotGeometries(next);
+    } catch {
+      // If parsing fails, we simply won't render polygons.
     }
   }, []);
 
@@ -163,6 +206,25 @@ export default function App() {
     if (!selectedParkingLotId) return null;
     return parkingLotById.get(selectedParkingLotId) ?? null;
   }, [parkingLotById, selectedParkingLotId]);
+
+  const fitMapToParkingLot = (lotId: string) => {
+    const geom = parkingLotGeometries[lotId];
+    if (!geom || !mapRef.current) return false;
+
+    const bounds = new google.maps.LatLngBounds();
+    for (const polygon of geom.polygons) {
+      for (const ring of polygon) {
+        for (const pt of ring) bounds.extend(pt);
+      }
+    }
+
+    if (!bounds.isEmpty()) {
+      mapRef.current.fitBounds(bounds, 48);
+      return true;
+    }
+
+    return false;
+  };
 
   return (
     <div className="container">
@@ -313,9 +375,17 @@ export default function App() {
                       type="button"
                       onClick={async () => {
                         try {
+                          setSelectedParkingLotId(l.id);
+
+                          const fitOk = fitMapToParkingLot(l.id);
+                          if (fitOk) {
+                            setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                            return;
+                          }
+
+                          // Fallback when no geometry exists for this lot.
                           setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
                           const pos = await geocodeParkingLot(l);
-                          setSelectedParkingLotId(l.id);
                           if (mapRef.current) mapRef.current.panTo(pos);
                           setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
                         } catch {
@@ -393,7 +463,34 @@ export default function App() {
                 />
               ))}
 
+              {Object.entries(parkingLotGeometries).flatMap(([id, geom]) => {
+                const lot = parkingLotById.get(id);
+                const title = lot?.lotName ?? lot?.mapLabel ?? 'Parking lot';
+                const isSelected = selectedParkingLotId === id;
+
+                return geom.polygons.map((rings, idx) => (
+                  <PolygonF
+                    key={`lot-poly-${id}-${idx}`}
+                    paths={rings}
+                    options={{
+                      clickable: true,
+                      fillColor: '#ffd54a',
+                      fillOpacity: isSelected ? 0.35 : 0.18,
+                      strokeColor: '#ffd54a',
+                      strokeOpacity: 0.9,
+                      strokeWeight: isSelected ? 3 : 2,
+                      zIndex: isSelected ? 5 : 2
+                    }}
+                    onClick={() => {
+                      setSelectedParkingLotId(id);
+                      setStatusMsg(`Selected: ${title}`);
+                    }}
+                  />
+                ));
+              })}
+
               {Object.entries(parkingLotMarkers).map(([id, pos]) => {
+                if (parkingLotGeometries[id]) return null;
                 const lot = parkingLotById.get(id);
                 const title = lot?.lotName ?? lot?.mapLabel ?? 'Parking lot';
 
@@ -435,7 +532,7 @@ export default function App() {
                 </InfoWindowF>
               ) : null}
 
-              {selectedParkingLotId && parkingLotMarkers[selectedParkingLotId] && selectedParkingLot ? (
+              {selectedParkingLotId && !parkingLotGeometries[selectedParkingLotId] && parkingLotMarkers[selectedParkingLotId] && selectedParkingLot ? (
                 <InfoWindowF
                   position={parkingLotMarkers[selectedParkingLotId]}
                   onCloseClick={() => setSelectedParkingLotId(null)}
@@ -452,6 +549,39 @@ export default function App() {
                   </div>
                 </InfoWindowF>
               ) : null}
+
+              {selectedParkingLotId && parkingLotGeometries[selectedParkingLotId] && selectedParkingLot ? (() => {
+                const geom = parkingLotGeometries[selectedParkingLotId];
+                const bounds = new google.maps.LatLngBounds();
+                for (const polygon of geom.polygons) {
+                  for (const ring of polygon) {
+                    for (const pt of ring) bounds.extend(pt);
+                  }
+                }
+                const center = (() => {
+                  if (bounds.isEmpty()) return DEFAULT_CENTER;
+                  const c = bounds.getCenter();
+                  return { lat: c.lat(), lng: c.lng() };
+                })();
+
+                return (
+                  <InfoWindowF
+                    position={center}
+                    onCloseClick={() => setSelectedParkingLotId(null)}
+                  >
+                    <div style={{ color: '#0b1220', maxWidth: 260 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedParkingLot.lotName ?? 'Parking lot'}</div>
+                      <div style={{ fontSize: 13, lineHeight: 1.3 }}>
+                        Owner: {selectedParkingLot.ownership ?? '—'}
+                        <br />
+                        Capacity: {selectedParkingLot.capacity ?? '—'}
+                        <br />
+                        Accessible spaces: {selectedParkingLot.handicapSpace ?? '—'}
+                      </div>
+                    </div>
+                  </InfoWindowF>
+                );
+              })() : null}
             </GoogleMap>
           ) : (
             <div className="toast">
