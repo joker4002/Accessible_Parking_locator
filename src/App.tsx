@@ -33,6 +33,7 @@ export default function App() {
   const [query, setQuery] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [onlyAccessibleLots, setOnlyAccessibleLots] = useState<boolean>(true);
   const [parkingLots, setParkingLots] = useState<ParkingLotArea[]>([]);
   const [parkingLotsError, setParkingLotsError] = useState<string | null>(null);
   const [selectedParkingLotId, setSelectedParkingLotId] = useState<string | null>(null);
@@ -176,12 +177,27 @@ export default function App() {
         const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserPos(next);
         setStatusMsg('Location updated. Showing nearest accessible parking.');
-        if (mapRef.current) mapRef.current.panTo(next);
+        if (mapRef.current) {
+          mapRef.current.panTo(next);
+          mapRef.current.setZoom(15);
+        }
       },
-      () => {
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          setStatusMsg('Location permission denied. Allow location access in your browser settings and try again.');
+          return;
+        }
+        if (err.code === err.POSITION_UNAVAILABLE) {
+          setStatusMsg('Location unavailable. Check your device location services and try again.');
+          return;
+        }
+        if (err.code === err.TIMEOUT) {
+          setStatusMsg('Location request timed out. Try again, or move closer to a window for better GPS signal.');
+          return;
+        }
         setStatusMsg('Could not access location. You can still use the map and list.');
       },
-      { enableHighAccuracy: true, timeout: 8000 }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 }
     );
   };
 
@@ -195,12 +211,18 @@ export default function App() {
 
   const filteredParkingLots = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return parkingLots;
-    return parkingLots.filter((l) => {
+    const filtered = parkingLots.filter((l) => {
+      if (!onlyAccessibleLots) return true;
+      const n = Number.parseInt(String(l.handicapSpace ?? '').trim(), 10);
+      return Number.isFinite(n) && n > 0;
+    });
+
+    if (!q) return filtered;
+    return filtered.filter((l) => {
       const hay = `${l.lotName ?? ''} ${l.ownership ?? ''} ${l.mapLabel ?? ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [parkingLots, query]);
+  }, [parkingLots, query, onlyAccessibleLots]);
 
   const selectedParkingLot = useMemo(() => {
     if (!selectedParkingLotId) return null;
@@ -245,6 +267,17 @@ export default function App() {
             placeholder="e.g., Downtown, KGH, Market Square"
             inputMode="search"
           />
+
+          <div style={{ height: 10 }} />
+
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={onlyAccessibleLots}
+              onChange={(e) => setOnlyAccessibleLots(e.target.checked)}
+            />
+            Only show lots with accessible spaces
+          </label>
 
           <div style={{ height: 10 }} />
 
@@ -467,6 +500,12 @@ export default function App() {
                 const lot = parkingLotById.get(id);
                 const title = lot?.lotName ?? lot?.mapLabel ?? 'Parking lot';
                 const isSelected = selectedParkingLotId === id;
+                const handicapN = Number.parseInt(String(lot?.handicapSpace ?? '').trim(), 10);
+                const hasAccessible = Number.isFinite(handicapN) && handicapN > 0;
+                if (onlyAccessibleLots && !hasAccessible) return [];
+
+                const fillColor = hasAccessible ? '#22c55e' : '#ffd54a';
+                const strokeColor = hasAccessible ? '#16a34a' : '#ffd54a';
 
                 return geom.polygons.map((rings, idx) => (
                   <PolygonF
@@ -474,9 +513,9 @@ export default function App() {
                     paths={rings}
                     options={{
                       clickable: true,
-                      fillColor: '#ffd54a',
+                      fillColor,
                       fillOpacity: isSelected ? 0.35 : 0.18,
-                      strokeColor: '#ffd54a',
+                      strokeColor,
                       strokeOpacity: 0.9,
                       strokeWeight: isSelected ? 3 : 2,
                       zIndex: isSelected ? 5 : 2
