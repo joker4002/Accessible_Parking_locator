@@ -20,6 +20,7 @@ export default function App() {
   });
 
   const mapRef = useRef<google.maps.Map | null>(null);
+  const pendingLotGeocodeRef = useRef<Record<string, Promise<{ lat: number; lng: number }> | undefined>>({});
 
   const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
   const [radiusKm, setRadiusKm] = useState<number>(2);
@@ -28,6 +29,8 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [parkingLots, setParkingLots] = useState<ParkingLotArea[]>([]);
   const [parkingLotsError, setParkingLotsError] = useState<string | null>(null);
+  const [selectedParkingLotId, setSelectedParkingLotId] = useState<string | null>(null);
+  const [parkingLotMarkers, setParkingLotMarkers] = useState<Record<string, { lat: number; lng: number }>>({});
 
   const now = useMemo(() => new Date(), []);
 
@@ -73,6 +76,49 @@ export default function App() {
     }
   }, []);
 
+  const parkingLotById = useMemo(() => {
+    const m = new Map<string, ParkingLotArea>();
+    for (const l of parkingLots) m.set(l.id, l);
+    return m;
+  }, [parkingLots]);
+
+  const geocodeParkingLot = async (lot: ParkingLotArea): Promise<{ lat: number; lng: number }> => {
+    const cached = parkingLotMarkers[lot.id];
+    if (cached) return cached;
+
+    const pending = pendingLotGeocodeRef.current[lot.id];
+    if (pending) return pending;
+
+    const p = new Promise<{ lat: number; lng: number }>((resolve, reject) => {
+      if (!isLoaded || !apiKey) {
+        reject(new Error('Google Maps not loaded'));
+        return;
+      }
+
+      const query = `${lot.lotName ?? lot.mapLabel ?? 'Parking lot'} Kingston ON`;
+      const geocoder = new google.maps.Geocoder();
+      geocoder.geocode({ address: query }, (results, status) => {
+        if (status !== 'OK' || !results || results.length === 0) {
+          reject(new Error(`Geocode failed (${status})`));
+          return;
+        }
+
+        const loc = results[0].geometry.location;
+        resolve({ lat: loc.lat(), lng: loc.lng() });
+      });
+    });
+
+    pendingLotGeocodeRef.current[lot.id] = p;
+
+    try {
+      const pos = await p;
+      setParkingLotMarkers((prev) => ({ ...prev, [lot.id]: pos }));
+      return pos;
+    } finally {
+      delete pendingLotGeocodeRef.current[lot.id];
+    }
+  };
+
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
   const onLocateMe = () => {
@@ -112,6 +158,11 @@ export default function App() {
       return hay.includes(q);
     });
   }, [parkingLots, query]);
+
+  const selectedParkingLot = useMemo(() => {
+    if (!selectedParkingLotId) return null;
+    return parkingLotById.get(selectedParkingLotId) ?? null;
+  }, [parkingLotById, selectedParkingLotId]);
 
   return (
     <div className="container">
@@ -258,6 +309,22 @@ export default function App() {
                   <div style={{ height: 10 }} />
 
                   <div className="row">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
+                          const pos = await geocodeParkingLot(l);
+                          setSelectedParkingLotId(l.id);
+                          if (mapRef.current) mapRef.current.panTo(pos);
+                          setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                        } catch {
+                          setStatusMsg('Could not locate this parking lot on the map.');
+                        }
+                      }}
+                    >
+                      Show on map
+                    </button>
                     <a
                       href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${l.lotName ?? l.mapLabel ?? 'parking'} Kingston ON`)}`}
                       target="_blank"
@@ -326,6 +393,32 @@ export default function App() {
                 />
               ))}
 
+              {Object.entries(parkingLotMarkers).map(([id, pos]) => {
+                const lot = parkingLotById.get(id);
+                const title = lot?.lotName ?? lot?.mapLabel ?? 'Parking lot';
+
+                return (
+                  <MarkerF
+                    key={`lot-${id}`}
+                    position={pos}
+                    onClick={() => {
+                      setSelectedParkingLotId(id);
+                      setStatusMsg(`Selected: ${title}`);
+                    }}
+                    title={title}
+                    icon={{
+                      path: google.maps.SymbolPath.CIRCLE,
+                      scale: 7,
+                      fillColor: '#ffd54a',
+                      fillOpacity: 1,
+                      strokeColor: '#0b1220',
+                      strokeOpacity: 1,
+                      strokeWeight: 2
+                    }}
+                  />
+                );
+              })}
+
               {selectedSpot ? (
                 <InfoWindowF
                   position={{ lat: selectedSpot.lat, lng: selectedSpot.lng }}
@@ -337,6 +430,24 @@ export default function App() {
                       {selectedSpot.description ?? 'Accessible parking location.'}
                       <br />
                       Zone: {selectedSpot.zone ?? '—'}
+                    </div>
+                  </div>
+                </InfoWindowF>
+              ) : null}
+
+              {selectedParkingLotId && parkingLotMarkers[selectedParkingLotId] && selectedParkingLot ? (
+                <InfoWindowF
+                  position={parkingLotMarkers[selectedParkingLotId]}
+                  onCloseClick={() => setSelectedParkingLotId(null)}
+                >
+                  <div style={{ color: '#0b1220', maxWidth: 260 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedParkingLot.lotName ?? 'Parking lot'}</div>
+                    <div style={{ fontSize: 13, lineHeight: 1.3 }}>
+                      Owner: {selectedParkingLot.ownership ?? '—'}
+                      <br />
+                      Capacity: {selectedParkingLot.capacity ?? '—'}
+                      <br />
+                      Accessible spaces: {selectedParkingLot.handicapSpace ?? '—'}
                     </div>
                   </div>
                 </InfoWindowF>
