@@ -35,8 +35,10 @@ export default function App() {
   const pendingLotGeocodeRef = useRef<Record<string, Promise<{ lat: number; lng: number }> | undefined>>({});
 
   const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
+  const [refPos, setRefPos] = useState<{ lat: number; lng: number } | null>(null);
   const [radiusKm, setRadiusKm] = useState<number>(2);
   const [query, setQuery] = useState<string>('');
+  const [filterQuery, setFilterQuery] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [onlyAccessibleLots, setOnlyAccessibleLots] = useState<boolean>(true);
@@ -53,7 +55,7 @@ export default function App() {
   const now = useMemo(() => new Date(), []);
 
   const spots: SpotWithDistance[] = useMemo(() => {
-    const origin = userPos ?? DEFAULT_CENTER;
+    const origin = userPos ?? refPos ?? DEFAULT_CENTER;
     const computed = MOCK_SPOTS.map((s) => ({
       ...s,
       distanceMeters: haversineMeters(origin, { lat: s.lat, lng: s.lng })
@@ -62,14 +64,14 @@ export default function App() {
     const radM = radiusKm * 1000;
     const filteredByRadius = computed.filter((s) => s.distanceMeters <= radM);
 
-    const q = query.trim().toLowerCase();
+    const q = filterQuery.trim().toLowerCase();
     if (!q) return filteredByRadius;
 
     return filteredByRadius.filter((s) => {
       const hay = `${s.name} ${s.zone ?? ''} ${s.description ?? ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [userPos, radiusKm, query]);
+  }, [userPos, refPos, radiusKm, filterQuery]);
 
   const selectedSpot = useMemo(() => {
     if (!selectedId) return null;
@@ -175,6 +177,31 @@ export default function App() {
 
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
+  const shouldGeocodeQuery = (q: string) => {
+    const t = q.trim();
+    if (t.length < 6) return false;
+    return /\d/.test(t) || t.includes(',');
+  };
+
+  const geocodeAddress = async (address: string): Promise<{ lat: number; lng: number }> => {
+    if (!isLoaded || !apiKey) throw new Error('Google Maps not loaded');
+    const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+    if (!gmaps) throw new Error('Google Maps not loaded');
+
+    return new Promise<{ lat: number; lng: number }>((resolve, reject) => {
+      const geocoder = new gmaps.Geocoder();
+      geocoder.geocode({ address }, (results, status) => {
+        if (status !== 'OK' || !results || results.length === 0) {
+          reject(new Error(`Geocode failed (${status})`));
+          return;
+        }
+
+        const loc = results[0].geometry.location;
+        resolve({ lat: loc.lat(), lng: loc.lng() });
+      });
+    });
+  };
+
   const onLocateMe = () => {
     if (!canUseGeo) {
       setStatusMsg('Geolocation not available in this browser.');
@@ -186,6 +213,7 @@ export default function App() {
       (pos) => {
         const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserPos(next);
+        setRefPos(null);
         setStatusMsg('Location updated. Showing nearest accessible parking.');
         if (mapRef.current) {
           mapRef.current.setCenter(next);
@@ -217,6 +245,7 @@ export default function App() {
 
   const onCenterKingston = () => {
     setUserPos(null);
+    setRefPos(null);
     setStatusMsg('Centered on Downtown Kingston.');
     if (mapRef.current) mapRef.current.panTo(DEFAULT_CENTER);
   };
@@ -224,7 +253,7 @@ export default function App() {
   const ariaStatusId = 'app-status';
 
   const filteredParkingLots = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = filterQuery.trim().toLowerCase();
     const filtered = parkingLots.filter((l) => {
       if (!onlyAccessibleLots) return true;
       const n = Number.parseInt(String(l.handicapSpace ?? '').trim(), 10);
@@ -236,7 +265,7 @@ export default function App() {
       const hay = `${l.lotName ?? ''} ${l.ownership ?? ''} ${l.mapLabel ?? ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [parkingLots, query, onlyAccessibleLots]);
+  }, [parkingLots, filterQuery, onlyAccessibleLots]);
 
   const selectedParkingLot = useMemo(() => {
     if (!selectedParkingLotId) return null;
@@ -391,7 +420,31 @@ export default function App() {
             <input
               aria-labelledby="search-label"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setQuery(next);
+                setFilterQuery(next);
+              }}
+              onKeyDown={async (e) => {
+                if (e.key !== 'Enter') return;
+                const raw = query.trim();
+                if (!shouldGeocodeQuery(raw)) return;
+
+                e.preventDefault();
+                try {
+                  setStatusMsg('Searching for that address…');
+                  const pos = await geocodeAddress(raw);
+                  setRefPos(pos);
+                  setFilterQuery('');
+                  if (mapRef.current) {
+                    mapRef.current.panTo(pos);
+                    mapRef.current.setZoom(15);
+                  }
+                  setStatusMsg('Address found. Showing nearby accessible parking.');
+                } catch {
+                  setStatusMsg('Could not find that location. Try adding “Kingston, ON”.');
+                }
+              }}
               placeholder="e.g., Downtown, KGH, Market Square"
               inputMode="search"
             />
@@ -751,6 +804,21 @@ export default function App() {
                   />
                 );
               })}
+
+              {refPos ? (
+                <MarkerF
+                  key="ref-location"
+                  position={refPos}
+                  title="Searched location"
+                  label={{
+                    text: '📍',
+                    color: '#111827',
+                    fontSize: '16px',
+                    fontWeight: '700'
+                  }}
+                  zIndex={11}
+                />
+              ) : null}
 
               {userPos ? (
                 <MarkerF

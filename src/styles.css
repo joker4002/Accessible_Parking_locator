@@ -78,8 +78,10 @@ a {
   position: sticky;
   top: 0;
   z-index: 5;
-  background: rgba(11, 18, 32, 0.92);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent);
   backdrop-filter: blur(10px);
+  margin: -16px -16px 0;
+  padding: 16px;
   padding-bottom: 12px;
 }
 
