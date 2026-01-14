@@ -177,29 +177,69 @@ export default function App() {
 
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
-  const shouldGeocodeQuery = (q: string) => {
-    const t = q.trim();
-    if (t.length < 6) return false;
-    return /\d/.test(t) || t.includes(',');
-  };
-
   const geocodeAddress = async (address: string): Promise<{ lat: number; lng: number }> => {
     if (!isLoaded || !apiKey) throw new Error('Google Maps not loaded');
     const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
     if (!gmaps) throw new Error('Google Maps not loaded');
 
-    return new Promise<{ lat: number; lng: number }>((resolve, reject) => {
-      const geocoder = new gmaps.Geocoder();
-      geocoder.geocode({ address }, (results, status) => {
-        if (status !== 'OK' || !results || results.length === 0) {
-          reject(new Error(`Geocode failed (${status})`));
-          return;
-        }
+    const bounds = new gmaps.LatLngBounds(
+      new gmaps.LatLng(DEFAULT_CENTER.lat - 0.2, DEFAULT_CENTER.lng - 0.25),
+      new gmaps.LatLng(DEFAULT_CENTER.lat + 0.2, DEFAULT_CENTER.lng + 0.25)
+    );
 
-        const loc = results[0].geometry.location;
-        resolve({ lat: loc.lat(), lng: loc.lng() });
+    const tries: string[] = [];
+    const raw = address.trim();
+    if (raw) tries.push(raw);
+    if (raw && !/\bkingston\b/i.test(raw)) tries.push(`${raw} Kingston, ON`);
+
+    const tryOne = (addr: string) =>
+      new Promise<{ lat: number; lng: number }>((resolve, reject) => {
+        const geocoder = new gmaps.Geocoder();
+        geocoder.geocode(
+          {
+            address: addr,
+            bounds,
+            region: 'ca'
+          },
+          (results, status) => {
+            if (status !== 'OK' || !results || results.length === 0) {
+              reject(new Error(`Geocode failed (${status})`));
+              return;
+            }
+
+            const loc = results[0].geometry.location;
+            resolve({ lat: loc.lat(), lng: loc.lng() });
+          }
+        );
       });
-    });
+
+    let lastErr: unknown = null;
+    for (const t of tries) {
+      try {
+        return await tryOne(t);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw lastErr ?? new Error('Geocode failed');
+  };
+
+  const onUseMapCenterAsLocation = () => {
+    const c = mapRef.current?.getCenter();
+    if (!c) {
+      setStatusMsg('Map is not ready yet.');
+      return;
+    }
+
+    const next = { lat: c.lat(), lng: c.lng() };
+    setUserPos(next);
+    setRefPos(null);
+    setStatusMsg('Using map center as your location.');
+
+    if (lastRoute) {
+      routeTo(lastRoute.destination, lastRoute.label, next);
+    }
   };
 
   const onLocateMe = () => {
@@ -445,21 +485,20 @@ export default function App() {
               onKeyDown={async (e) => {
                 if (e.key !== 'Enter') return;
                 const raw = query.trim();
-                if (!shouldGeocodeQuery(raw)) return;
-
                 e.preventDefault();
                 try {
-                  setStatusMsg('Searching for that address…');
+                  setStatusMsg('Searching for that place…');
                   const pos = await geocodeAddress(raw);
                   setRefPos(pos);
                   setFilterQuery('');
+                  setActiveTab('results');
                   if (mapRef.current) {
                     mapRef.current.panTo(pos);
                     mapRef.current.setZoom(15);
                   }
-                  setStatusMsg('Address found. Showing nearby accessible parking.');
+                  setStatusMsg('Place found. Showing nearby accessible parking.');
                 } catch {
-                  setStatusMsg('Could not find that location. Try adding “Kingston, ON”.');
+                  setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
                 }
               }}
               placeholder="e.g., Downtown, KGH, Market Square"
@@ -512,6 +551,9 @@ export default function App() {
               </button>
               <button type="button" className="secondary" onClick={onCenterKingston} aria-describedby={ariaStatusId}>
                 Center on Kingston
+              </button>
+              <button type="button" className="secondary" onClick={onUseMapCenterAsLocation} aria-describedby={ariaStatusId}>
+                Use map center
               </button>
               {directions ? (
                 <button type="button" className="secondary" onClick={clearRoute} aria-describedby={ariaStatusId}>
