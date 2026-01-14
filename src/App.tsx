@@ -1,4 +1,4 @@
-import { GoogleMap, InfoWindowF, MarkerF, PolygonF, useJsApiLoader } from '@react-google-maps/api';
+import { DirectionsRenderer, GoogleMap, InfoWindowF, MarkerF, PolygonF, useJsApiLoader } from '@react-google-maps/api';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { haversineMeters, formatDistance } from './geo';
 import { MOCK_SPOTS } from './mockData';
@@ -39,6 +39,8 @@ export default function App() {
   const [selectedParkingLotId, setSelectedParkingLotId] = useState<string | null>(null);
   const [parkingLotMarkers, setParkingLotMarkers] = useState<Record<string, { lat: number; lng: number }>>({});
   const [parkingLotGeometries, setParkingLotGeometries] = useState<Record<string, ParkingLotGeometry>>({});
+  const [activeTab, setActiveTab] = useState<'results' | 'lots'>('results');
+  const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
 
   const now = useMemo(() => new Date(), []);
 
@@ -248,205 +250,292 @@ export default function App() {
     return false;
   };
 
+  const clearRoute = () => {
+    setDirections(null);
+    setStatusMsg('Route cleared.');
+  };
+
+  const routeTo = (destination: { lat: number; lng: number }, label: string) => {
+    if (!isLoaded || !apiKey) {
+      setStatusMsg('Map is still loading. Try again in a moment.');
+      return;
+    }
+    if (!userPos) {
+      setStatusMsg('Click “Locate me” first to enable in-app navigation.');
+      return;
+    }
+
+    const svc = new google.maps.DirectionsService();
+    svc.route(
+      {
+        origin: userPos,
+        destination,
+        travelMode: google.maps.TravelMode.DRIVING,
+        provideRouteAlternatives: false
+      },
+      (result, status) => {
+        if (status !== 'OK' || !result) {
+          setStatusMsg('Could not compute a route. Try again.');
+          return;
+        }
+
+        setDirections(result);
+        const b = result.routes?.[0]?.bounds;
+        if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
+        setStatusMsg(`Route to ${label} shown on map.`);
+      }
+    );
+  };
+
   return (
     <div className="container">
       <aside className="sidebar" aria-label="Search and results">
-        <div className="header">
-          <div className="brand">
-            <h1>KingstonAccess</h1>
-            <p>Accessible parking finder + availability hint</p>
+        <div className="sidebarTop">
+          <div className="header">
+            <div className="brand">
+              <h1>KingstonAccess</h1>
+              <p>Accessible parking finder + availability hint</p>
+            </div>
           </div>
-        </div>
 
-        <div className="card" role="region" aria-label="Search controls">
-          <div className="label" id="search-label">Search</div>
-          <input
-            aria-labelledby="search-label"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="e.g., Downtown, KGH, Market Square"
-            inputMode="search"
-          />
-
-          <div style={{ height: 10 }} />
-
-          <label className="toggle">
+          <div className="card" role="region" aria-label="Search controls">
+            <div className="label" id="search-label">Search</div>
             <input
-              type="checkbox"
-              checked={onlyAccessibleLots}
-              onChange={(e) => setOnlyAccessibleLots(e.target.checked)}
+              aria-labelledby="search-label"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="e.g., Downtown, KGH, Market Square"
+              inputMode="search"
             />
-            Only show lots with accessible spaces
-          </label>
 
-          <div style={{ height: 10 }} />
+            <div style={{ height: 10 }} />
 
-          <div className="label" id="radius-label">Distance filter</div>
-          <select
-            aria-labelledby="radius-label"
-            value={radiusKm}
-            onChange={(e) => setRadiusKm(Number(e.target.value))}
-          >
-            <option value={0.5}>0.5 km</option>
-            <option value={1}>1 km</option>
-            <option value={2}>2 km</option>
-            <option value={5}>5 km</option>
-          </select>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={onlyAccessibleLots}
+                onChange={(e) => setOnlyAccessibleLots(e.target.checked)}
+              />
+              Only show lots with accessible spaces
+            </label>
 
-          <div style={{ height: 10 }} />
+            <div style={{ height: 10 }} />
 
-          <div className="row">
-            <button type="button" onClick={onLocateMe} aria-describedby={ariaStatusId}>
-              Locate me
-            </button>
-            <button type="button" className="secondary" onClick={onCenterKingston} aria-describedby={ariaStatusId}>
-              Center on Kingston
-            </button>
-          </div>
+            <div className="label" id="radius-label">Distance filter</div>
+            <select
+              aria-labelledby="radius-label"
+              value={radiusKm}
+              onChange={(e) => setRadiusKm(Number(e.target.value))}
+            >
+              <option value={0.5}>0.5 km</option>
+              <option value={1}>1 km</option>
+              <option value={2}>2 km</option>
+              <option value={5}>5 km</option>
+            </select>
 
-          <div style={{ height: 10 }} />
+            <div style={{ height: 10 }} />
 
-          <div className="help" id={ariaStatusId} aria-live="polite">
-            {statusMsg ?? 'Tip: Use keyboard Tab/Shift+Tab to navigate controls and results.'}
+            <div className="row">
+              <button type="button" onClick={onLocateMe} aria-describedby={ariaStatusId}>
+                Locate me
+              </button>
+              <button type="button" className="secondary" onClick={onCenterKingston} aria-describedby={ariaStatusId}>
+                Center on Kingston
+              </button>
+              {directions ? (
+                <button type="button" className="secondary" onClick={clearRoute} aria-describedby={ariaStatusId}>
+                  Clear route
+                </button>
+              ) : null}
+            </div>
+
+            <div style={{ height: 10 }} />
+
+            <div className="help" id={ariaStatusId} aria-live="polite">
+              {statusMsg ?? 'Tip: Use keyboard Tab/Shift+Tab to navigate controls and results.'}
+            </div>
           </div>
         </div>
 
-        <div className="card" role="region" aria-label="Results list">
-          <div className="label">Results ({spots.length})</div>
-          <div className="list" role="list">
-            {spots.map((s) => {
-              const pred = predictAvailability(s, now);
-              const chipClass = pred.label === 'High' ? 'good' : pred.label === 'Medium' ? 'mid' : 'bad';
+        <div className="sidebarScroll" aria-label="Lists">
+          <div className="tabs" role="tablist" aria-label="List tabs">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'results'}
+              className={`tabButton ${activeTab === 'results' ? 'active' : ''}`}
+              onClick={() => setActiveTab('results')}
+            >
+              Results
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'lots'}
+              className={`tabButton ${activeTab === 'lots' ? 'active' : ''}`}
+              onClick={() => setActiveTab('lots')}
+            >
+              Parking lots
+            </button>
+          </div>
 
-              return (
-                <div
-                  key={s.id}
-                  className="item"
-                  role="listitem"
-                >
-                  <div className="itemHeader">
-                    <div>
-                      <div className="itemTitle">{s.name}</div>
+          {activeTab === 'results' ? (
+            <div className="card" role="region" aria-label="Results list">
+              <div className="label">Results ({spots.length})</div>
+              <div className="list" role="list">
+                {spots.map((s) => {
+                  const pred = predictAvailability(s, now);
+                  const chipClass = pred.label === 'High' ? 'good' : pred.label === 'Medium' ? 'mid' : 'bad';
+
+                  return (
+                    <div
+                      key={s.id}
+                      className="item"
+                      role="listitem"
+                    >
+                      <div className="itemHeader">
+                        <div>
+                          <div className="itemTitle">{s.name}</div>
+                          <div className="itemMeta">
+                            Zone: {s.zone ?? '—'}
+                            <br />
+                            Distance: {formatDistance(s.distanceMeters)}
+                          </div>
+                        </div>
+                        <div className={`chip ${chipClass}`} aria-label={`Availability ${pred.label}`}>
+                          {pred.label} ({Math.round(pred.probability * 100)}%)
+                        </div>
+                      </div>
+
                       <div className="itemMeta">
-                        Zone: {s.zone ?? '—'}
+                        {pred.rationale}
                         <br />
-                        Distance: {formatDistance(s.distanceMeters)}
+                        Curb ramp: {s.hasCurbRamp === true ? 'Yes' : s.hasCurbRamp === false ? 'Unknown/No' : 'Unknown'}
+                      </div>
+
+                      <div style={{ height: 10 }} />
+
+                      <div className="row">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedId(s.id);
+                            setStatusMsg(`Selected: ${s.name}`);
+                            if (mapRef.current) mapRef.current.panTo({ lat: s.lat, lng: s.lng });
+                          }}
+                        >
+                          View on map
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => routeTo({ lat: s.lat, lng: s.lng }, s.name)}
+                        >
+                          Navigate
+                        </button>
                       </div>
                     </div>
-                    <div className={`chip ${chipClass}`} aria-label={`Availability ${pred.label}`}>
-                      {pred.label} ({Math.round(pred.probability * 100)}%)
-                    </div>
-                  </div>
+                  );
+                })}
 
-                  <div className="itemMeta">
-                    {pred.rationale}
-                    <br />
-                    Curb ramp: {s.hasCurbRamp === true ? 'Yes' : s.hasCurbRamp === false ? 'Unknown/No' : 'Unknown'}
-                  </div>
+                {spots.length === 0 ? (
+                  <div className="help">No spots match. Try increasing distance or clearing search.</div>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="card" role="region" aria-label="Parking lot areas dataset">
+              <div className="label">Parking lots ({filteredParkingLots.length})</div>
+              {parkingLotsError ? <div className="help">{parkingLotsError}</div> : null}
+              <div className="list" role="list">
+                {filteredParkingLots.map((l) => {
+                  const handicap = l.handicapSpace ?? '—';
+                  const capacity = l.capacity ?? '—';
 
-                  <div style={{ height: 10 }} />
+                  return (
+                    <div key={l.id} className="item" role="listitem">
+                      <div className="itemHeader">
+                        <div>
+                          <div className="itemTitle">{l.lotName ?? 'Unnamed lot'}</div>
+                          <div className="itemMeta">
+                            Owner: {l.ownership ?? '—'}
+                            <br />
+                            Capacity: {capacity}
+                            <br />
+                            Accessible spaces: {handicap}
+                          </div>
+                        </div>
+                        <div className="chip" aria-label="City dataset">City dataset</div>
+                      </div>
 
-                  <div className="row">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedId(s.id);
-                        setStatusMsg(`Selected: ${s.name}`);
-                        if (mapRef.current) mapRef.current.panTo({ lat: s.lat, lng: s.lng });
-                      }}
-                    >
-                      View on map
-                    </button>
-                    <a
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${s.lat},${s.lng}`)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <button type="button" className="secondary">
-                        Navigate
-                      </button>
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
+                      <div style={{ height: 10 }} />
 
-            {spots.length === 0 ? (
-              <div className="help">No spots match. Try increasing distance or clearing search.</div>
-            ) : null}
-          </div>
-        </div>
+                      <div className="row">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              setSelectedParkingLotId(l.id);
 
-        <div className="card" role="region" aria-label="Parking lot areas dataset">
-          <div className="label">Parking lots ({filteredParkingLots.length})</div>
-          {parkingLotsError ? <div className="help">{parkingLotsError}</div> : null}
-          <div className="list" role="list">
-            {filteredParkingLots.map((l) => {
-              const handicap = l.handicapSpace ?? '—';
-              const capacity = l.capacity ?? '—';
+                              const fitOk = fitMapToParkingLot(l.id);
+                              if (fitOk) {
+                                setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                                return;
+                              }
 
-              return (
-                <div key={l.id} className="item" role="listitem">
-                  <div className="itemHeader">
-                    <div>
-                      <div className="itemTitle">{l.lotName ?? 'Unnamed lot'}</div>
-                      <div className="itemMeta">
-                        Owner: {l.ownership ?? '—'}
-                        <br />
-                        Capacity: {capacity}
-                        <br />
-                        Accessible spaces: {handicap}
+                              // Fallback when no geometry exists for this lot.
+                              setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
+                              const pos = await geocodeParkingLot(l);
+                              if (mapRef.current) mapRef.current.panTo(pos);
+                              setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                            } catch {
+                              setStatusMsg('Could not locate this parking lot on the map.');
+                            }
+                          }}
+                        >
+                          View on map
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => {
+                            const ok = fitMapToParkingLot(l.id);
+                            if (!ok) {
+                              setStatusMsg('This lot has no boundary geometry available.');
+                              return;
+                            }
+
+                            const geom = parkingLotGeometries[l.id];
+                            const b = new google.maps.LatLngBounds();
+                            for (const poly of geom.polygons) {
+                              for (const ring of poly) {
+                                for (const pt of ring) b.extend(pt);
+                              }
+                            }
+                            const c = (() => {
+                              if (b.isEmpty()) return DEFAULT_CENTER;
+                              const center = b.getCenter();
+                              return { lat: center.lat(), lng: center.lng() };
+                            })();
+                            routeTo(c, l.lotName ?? 'Parking lot');
+                          }}
+                        >
+                          Navigate
+                        </button>
                       </div>
                     </div>
-                    <div className="chip" aria-label="City dataset">City dataset</div>
-                  </div>
+                  );
+                })}
+                {filteredParkingLots.length === 0 ? (
+                  <div className="help">No parking lots match your search.</div>
+                ) : null}
+              </div>
+            </div>
+          )}
 
-                  <div style={{ height: 10 }} />
-
-                  <div className="row">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          setSelectedParkingLotId(l.id);
-
-                          const fitOk = fitMapToParkingLot(l.id);
-                          if (fitOk) {
-                            setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
-                            return;
-                          }
-
-                          // Fallback when no geometry exists for this lot.
-                          setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
-                          const pos = await geocodeParkingLot(l);
-                          if (mapRef.current) mapRef.current.panTo(pos);
-                          setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
-                        } catch {
-                          setStatusMsg('Could not locate this parking lot on the map.');
-                        }
-                      }}
-                    >
-                      Show on map
-                    </button>
-                    <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${l.lotName ?? l.mapLabel ?? 'parking'} Kingston ON`)}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <button type="button" className="secondary">Open in Google Maps</button>
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
-            {filteredParkingLots.length === 0 ? (
-              <div className="help">No parking lots match your search.</div>
-            ) : null}
+          <div className="help">
+            Data note: currently using a small built-in demo dataset. Replace with Open Data Kingston feed when available.
           </div>
-        </div>
-
-        <div className="help">
-          Data note: currently using a small built-in demo dataset. Replace with Open Data Kingston feed when available.
         </div>
       </aside>
 
@@ -484,6 +573,16 @@ export default function App() {
                 keyboardShortcuts: true
               }}
             >
+              {directions ? (
+                <DirectionsRenderer
+                  directions={directions}
+                  options={{
+                    preserveViewport: true,
+                    suppressMarkers: false
+                  }}
+                />
+              ) : null}
+
               {spots.map((s) => (
                 <MarkerF
                   key={s.id}

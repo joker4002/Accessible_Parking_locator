@@ -11,3 +11,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Vite temp files
+vite.config.ts.timestamp-*
+
+src/Parking_Lot_Areas.cpg
+src/Parking_Lot_Areas.dbf
+src/Parking_Lot_Areas.kml
+src/Parking_Lot_Areas.prj
+src/Parking_Lot_Areas.shp
+src/Parking_Lot_Areas.shx
