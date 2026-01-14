@@ -39,6 +39,7 @@ export default function App() {
 
   const mapRef = useRef<google.maps.Map | null>(null);
   const pendingLotGeocodeRef = useRef<Record<string, Promise<{ lat: number; lng: number }> | undefined>>({});
+  const placeSearchAbortRef = useRef<AbortController | null>(null);
 
   const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
   const [refPos, setRefPos] = useState<{ lat: number; lng: number } | null>(null);
@@ -47,6 +48,7 @@ export default function App() {
   const [filterQuery, setFilterQuery] = useState<string>('');
   const [placeSuggestions, setPlaceSuggestions] = useState<Array<{ label: string; lat: number; lng: number }>>([]);
   const [isSearchingPlaces, setIsSearchingPlaces] = useState<boolean>(false);
+  const [placeSelected, setPlaceSelected] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [onlyAccessibleLots, setOnlyAccessibleLots] = useState<boolean>(true);
@@ -214,7 +216,7 @@ export default function App() {
 
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
-  const searchPlacesFree = async (q: string): Promise<Array<{ label: string; lat: number; lng: number }>> => {
+  const searchPlacesFree = async (q: string, signal?: AbortSignal): Promise<Array<{ label: string; lat: number; lng: number }>> => {
     const query = q.trim();
     if (!query) return [];
 
@@ -225,6 +227,8 @@ export default function App() {
       u.searchParams.set('limit', '8');
       u.searchParams.set('bbox', bbox);
       u.searchParams.set('lang', 'en');
+      u.searchParams.set('lat', String(DEFAULT_CENTER.lat));
+      u.searchParams.set('lon', String(DEFAULT_CENTER.lng));
       return u;
     };
 
@@ -236,6 +240,7 @@ export default function App() {
     for (const t of tries) {
       try {
         const res = await fetch(makeUrl(t).toString(), {
+          signal,
           headers: {
             Accept: 'application/json'
           }
@@ -273,6 +278,55 @@ export default function App() {
 
     throw lastErr ?? new Error('Search failed');
   };
+
+  const selectPlace = (pos: { lat: number; lng: number }, label?: string) => {
+    setRefPos(pos);
+    setFilterQuery('');
+    setActiveTab('results');
+    setPlaceSuggestions([]);
+    setPlaceSelected(true);
+    if (label) setStatusMsg(`Selected: ${label}`);
+
+    if (mapRef.current) {
+      mapRef.current.panTo(pos);
+      mapRef.current.setZoom(15);
+    }
+
+    setStatusMsg('Place selected. Selecting nearest accessible parking…');
+    autoSelectNearestSpotTo(pos);
+  };
+
+  useEffect(() => {
+    if (placeSelected) return;
+    const raw = query.trim();
+    if (raw.length < 2) {
+      setPlaceSuggestions([]);
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      try {
+        placeSearchAbortRef.current?.abort();
+        const ctrl = new AbortController();
+        placeSearchAbortRef.current = ctrl;
+
+        setIsSearchingPlaces(true);
+        const results = await searchPlacesFree(raw, ctrl.signal);
+        setPlaceSuggestions(results);
+        if (results.length > 0) {
+          setStatusMsg('Select a place below.');
+        }
+      } catch (e) {
+        if ((e as { name?: string } | null)?.name !== 'AbortError') {
+          setPlaceSuggestions([]);
+        }
+      } finally {
+        setIsSearchingPlaces(false);
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [query, placeSelected]);
 
   const geocodeAddress = async (address: string): Promise<{ lat: number; lng: number }> => {
     if (!isLoaded || !apiKey) throw new Error('Google Maps not loaded');
@@ -579,8 +633,9 @@ export default function App() {
               onChange={(e) => {
                 const next = e.target.value;
                 setQuery(next);
-                setFilterQuery(next);
-                setPlaceSuggestions([]);
+                setPlaceSelected(false);
+                setRefPos(null);
+                setFilterQuery('');
               }}
               onKeyDown={async (e) => {
                 if (e.key !== 'Enter') return;
@@ -589,6 +644,12 @@ export default function App() {
 
                 if (!raw) return;
 
+                if (placeSuggestions.length > 0) {
+                  const top = placeSuggestions[0];
+                  selectPlace({ lat: top.lat, lng: top.lng }, top.label);
+                  return;
+                }
+
                 try {
                   setIsSearchingPlaces(true);
                   setStatusMsg('Searching Kingston…');
@@ -596,17 +657,8 @@ export default function App() {
                   if (results.length === 0) throw new Error('No results');
 
                   if (results.length === 1) {
-                    const pos = { lat: results[0].lat, lng: results[0].lng };
-                    setRefPos(pos);
-                    setFilterQuery('');
-                    setActiveTab('results');
-                    setPlaceSuggestions([]);
-                    if (mapRef.current) {
-                      mapRef.current.panTo(pos);
-                      mapRef.current.setZoom(15);
-                    }
-                    setStatusMsg('Place found. Selecting nearest accessible parking…');
-                    autoSelectNearestSpotTo(pos);
+                    const top = results[0];
+                    selectPlace({ lat: top.lat, lng: top.lng }, top.label);
                   } else {
                     setPlaceSuggestions(results);
                     setStatusMsg('Multiple matches found. Select a place below.');
