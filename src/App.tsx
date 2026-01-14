@@ -302,9 +302,12 @@ export default function App() {
   };
 
   const accessibleLotCentroids = useMemo(() => {
+    const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+    if (!isLoaded || !gmaps) return {};
+
     const out: Record<string, { lat: number; lng: number }> = {};
     for (const [id, geom] of Object.entries(parkingLotGeometries)) {
-      const b = new google.maps.LatLngBounds();
+      const b = new gmaps.LatLngBounds();
       for (const poly of geom.polygons) {
         for (const ring of poly) {
           for (const pt of ring) b.extend(pt);
@@ -315,7 +318,7 @@ export default function App() {
       out[id] = { lat: c.lat(), lng: c.lng() };
     }
     return out;
-  }, [parkingLotGeometries]);
+  }, [parkingLotGeometries, isLoaded]);
 
   const routeSummary = useMemo(() => {
     const leg = directions?.routes?.[0]?.legs?.[0];
