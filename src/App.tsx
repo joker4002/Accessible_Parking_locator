@@ -4,7 +4,7 @@ import { haversineMeters, formatDistance } from './geo';
 import { MOCK_SPOTS } from './mockData';
 import parkingLotsCsv from './Parking_Lot_Areas.csv?raw';
 import parkingLotsGeoJson from './Parking_Lot_Areas.geojson?raw';
-import { parseParkingLotAreas } from './parkingLots';
+import { parseParkingLotAreas } from './parkingLots.ts';
 import { predictAvailability } from './predict';
 import type { ParkingLotArea, ParkingSpot } from './types';
 
