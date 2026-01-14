@@ -83,6 +83,8 @@ a {
   padding-bottom: 12px;
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.35);
   border-bottom: 1px solid var(--border);
+  max-height: 50vh;
+  overflow: auto;
 }
 
 .sidebarScroll {
@@ -188,6 +190,15 @@ button {
   border: 1px solid var(--border);
   background: var(--primary);
   color: white;
+  cursor: pointer;
+}
+
+.linkButton {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  text-decoration: underline;
   cursor: pointer;
 }
 

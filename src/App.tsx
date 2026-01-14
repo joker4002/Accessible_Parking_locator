@@ -267,6 +267,23 @@ export default function App() {
     });
   }, [parkingLots, filterQuery, onlyAccessibleLots]);
 
+  const resultsCount = spots.length;
+  const parkingLotsCount = filteredParkingLots.length;
+
+  useEffect(() => {
+    const q = filterQuery.trim();
+    if (!q) return;
+
+    if (activeTab === 'results' && resultsCount === 0 && parkingLotsCount > 0) {
+      setActiveTab('lots');
+      return;
+    }
+
+    if (activeTab === 'lots' && parkingLotsCount === 0 && resultsCount > 0) {
+      setActiveTab('results');
+    }
+  }, [activeTab, filterQuery, resultsCount, parkingLotsCount]);
+
   const selectedParkingLot = useMemo(() => {
     if (!selectedParkingLotId) return null;
     return parkingLotById.get(selectedParkingLotId) ?? null;
@@ -563,7 +580,7 @@ export default function App() {
               className={`tabButton ${activeTab === 'results' ? 'active' : ''}`}
               onClick={() => setActiveTab('results')}
             >
-              Results
+              Results ({resultsCount})
             </button>
             <button
               type="button"
@@ -572,7 +589,7 @@ export default function App() {
               className={`tabButton ${activeTab === 'lots' ? 'active' : ''}`}
               onClick={() => setActiveTab('lots')}
             >
-              Parking lots
+              Parking lots ({parkingLotsCount})
             </button>
           </div>
 
@@ -636,7 +653,20 @@ export default function App() {
                 })}
 
                 {spots.length === 0 ? (
-                  <div className="help">No spots match. Try increasing distance or clearing search.</div>
+                  <div className="help">
+                    No spots match.
+                    {parkingLotsCount > 0 ? (
+                      <>
+                        {' '}
+                        Found {parkingLotsCount} matching parking lot{parkingLotsCount === 1 ? '' : 's'}.{' '}
+                        <button type="button" className="linkButton" onClick={() => setActiveTab('lots')}>
+                          View parking lots
+                        </button>
+                      </>
+                    ) : (
+                      <> Try increasing distance or clearing search.</>
+                    )}
+                  </div>
                 ) : null}
               </div>
             </div>
