@@ -45,6 +45,8 @@ export default function App() {
   const [radiusKm, setRadiusKm] = useState<number>(2);
   const [query, setQuery] = useState<string>('');
   const [filterQuery, setFilterQuery] = useState<string>('');
+  const [placeSuggestions, setPlaceSuggestions] = useState<Array<{ label: string; lat: number; lng: number }>>([]);
+  const [isSearchingPlaces, setIsSearchingPlaces] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [onlyAccessibleLots, setOnlyAccessibleLots] = useState<boolean>(true);
@@ -212,19 +214,17 @@ export default function App() {
 
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
-  const geocodePlaceFree = async (q: string): Promise<{ lat: number; lng: number; label: string }> => {
+  const searchPlacesFree = async (q: string): Promise<Array<{ label: string; lat: number; lng: number }>> => {
     const query = q.trim();
-    if (!query) throw new Error('Empty query');
+    if (!query) return [];
 
+    const bbox = `${KINGSTON_VIEWBOX.left},${KINGSTON_VIEWBOX.bottom},${KINGSTON_VIEWBOX.right},${KINGSTON_VIEWBOX.top}`;
     const makeUrl = (qq: string) => {
-      const u = new URL('https://nominatim.openstreetmap.org/search');
-      u.searchParams.set('format', 'jsonv2');
+      const u = new URL('https://photon.komoot.io/api/');
       u.searchParams.set('q', qq);
-      u.searchParams.set('limit', '1');
-      u.searchParams.set('addressdetails', '1');
-      u.searchParams.set('countrycodes', 'ca');
-      u.searchParams.set('viewbox', `${KINGSTON_VIEWBOX.left},${KINGSTON_VIEWBOX.top},${KINGSTON_VIEWBOX.right},${KINGSTON_VIEWBOX.bottom}`);
-      u.searchParams.set('bounded', '1');
+      u.searchParams.set('limit', '8');
+      u.searchParams.set('bbox', bbox);
+      u.searchParams.set('lang', 'en');
       return u;
     };
 
@@ -237,24 +237,41 @@ export default function App() {
       try {
         const res = await fetch(makeUrl(t).toString(), {
           headers: {
-            'Accept': 'application/json'
+            Accept: 'application/json'
           }
         });
         if (!res.ok) throw new Error(`Search failed (${res.status})`);
-        const json = (await res.json()) as Array<{ lat: string; lon: string; display_name?: string }>;
-        const top = json?.[0];
-        if (!top) throw new Error('No results');
 
-        const lat = Number(top.lat);
-        const lng = Number(top.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Bad coordinates');
-        return { lat, lng, label: top.display_name ?? query };
+        const json = (await res.json()) as {
+          type?: string;
+          features?: Array<{
+            type?: string;
+            geometry?: { type?: string; coordinates?: [number, number] };
+            properties?: { name?: string; street?: string; city?: string; state?: string; country?: string; osm_value?: string };
+          }>;
+        };
+
+        const feats = json.features ?? [];
+        const out: Array<{ label: string; lat: number; lng: number }> = [];
+        for (const f of feats) {
+          const coords = f.geometry?.coordinates;
+          if (!coords || coords.length !== 2) continue;
+          const [lng, lat] = coords;
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+          const p = f.properties;
+          const labelParts = [p?.name, p?.street, p?.city, p?.state, p?.country].filter(Boolean);
+          const label = labelParts.length ? labelParts.join(', ') : query;
+          out.push({ label, lat, lng });
+          if (out.length >= 8) break;
+        }
+        return out;
       } catch (e) {
         lastErr = e;
       }
     }
 
-    throw lastErr ?? new Error('No results');
+    throw lastErr ?? new Error('Search failed');
   };
 
   const geocodeAddress = async (address: string): Promise<{ lat: number; lng: number }> => {
@@ -556,29 +573,44 @@ export default function App() {
             <div className="label" id="search-label">Search</div>
             <input
               aria-labelledby="search-label"
+              aria-busy={isSearchingPlaces}
               value={query}
+              disabled={isSearchingPlaces}
               onChange={(e) => {
                 const next = e.target.value;
                 setQuery(next);
                 setFilterQuery(next);
+                setPlaceSuggestions([]);
               }}
               onKeyDown={async (e) => {
                 if (e.key !== 'Enter') return;
                 const raw = query.trim();
                 e.preventDefault();
+
+                if (!raw) return;
+
                 try {
+                  setIsSearchingPlaces(true);
                   setStatusMsg('Searching Kingston…');
-                  const free = await geocodePlaceFree(raw);
-                  const pos = { lat: free.lat, lng: free.lng };
-                  setRefPos(pos);
-                  setFilterQuery('');
-                  setActiveTab('results');
-                  if (mapRef.current) {
-                    mapRef.current.panTo(pos);
-                    mapRef.current.setZoom(15);
+                  const results = await searchPlacesFree(raw);
+                  if (results.length === 0) throw new Error('No results');
+
+                  if (results.length === 1) {
+                    const pos = { lat: results[0].lat, lng: results[0].lng };
+                    setRefPos(pos);
+                    setFilterQuery('');
+                    setActiveTab('results');
+                    setPlaceSuggestions([]);
+                    if (mapRef.current) {
+                      mapRef.current.panTo(pos);
+                      mapRef.current.setZoom(15);
+                    }
+                    setStatusMsg('Place found. Selecting nearest accessible parking…');
+                    autoSelectNearestSpotTo(pos);
+                  } else {
+                    setPlaceSuggestions(results);
+                    setStatusMsg('Multiple matches found. Select a place below.');
                   }
-                  setStatusMsg('Place found. Selecting nearest accessible parking…');
-                  autoSelectNearestSpotTo(pos);
                 } catch {
                   try {
                     setStatusMsg('Search failed. Trying alternate lookup…');
@@ -586,6 +618,7 @@ export default function App() {
                     setRefPos(pos);
                     setFilterQuery('');
                     setActiveTab('results');
+                    setPlaceSuggestions([]);
                     if (mapRef.current) {
                       mapRef.current.panTo(pos);
                       mapRef.current.setZoom(15);
@@ -595,11 +628,41 @@ export default function App() {
                   } catch {
                     setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
                   }
+                } finally {
+                  setIsSearchingPlaces(false);
                 }
               }}
               placeholder="e.g., Downtown, KGH, Market Square"
               inputMode="search"
             />
+
+            {placeSuggestions.length > 0 ? (
+              <div className="suggestions" role="list" aria-label="Place suggestions">
+                {placeSuggestions.map((sug, idx) => (
+                  <button
+                    key={`${sug.lat},${sug.lng},${idx}`}
+                    type="button"
+                    className="suggestionButton"
+                    role="listitem"
+                    onClick={() => {
+                      const pos = { lat: sug.lat, lng: sug.lng };
+                      setRefPos(pos);
+                      setFilterQuery('');
+                      setActiveTab('results');
+                      setPlaceSuggestions([]);
+                      if (mapRef.current) {
+                        mapRef.current.panTo(pos);
+                        mapRef.current.setZoom(15);
+                      }
+                      setStatusMsg('Place selected. Selecting nearest accessible parking…');
+                      autoSelectNearestSpotTo(pos);
+                    }}
+                  >
+                    {sug.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div style={{ height: 10 }} />
 
