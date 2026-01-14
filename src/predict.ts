@@ -4,7 +4,7 @@ export function predictAvailability(spot: ParkingSpot, now: Date): AvailabilityP
   const day = now.getDay(); // 0 Sun .. 6 Sat
   const hour = now.getHours();
 
-  // Simple heuristic “AI-ish” predictor for MVP demos.
+  // Simple heuristic “AI-ish” predictor for demos.
   // Downtown tends to be busier on weekend late mornings/afternoons.
   const isWeekend = day === 0 || day === 6;
   const weekendPeak = isWeekend && hour >= 10 && hour <= 16;

@@ -2,8 +2,10 @@ import { GoogleMap, InfoWindowF, MarkerF, useJsApiLoader } from '@react-google-m
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { haversineMeters, formatDistance } from './geo';
 import { MOCK_SPOTS } from './mockData';
+import parkingLotsCsv from './Parking_Lot_Areas.csv?raw';
+import { parseParkingLotAreas } from './parkingLots';
 import { predictAvailability } from './predict';
-import type { ParkingSpot } from './types';
+import type { ParkingLotArea, ParkingSpot } from './types';
 
 const DEFAULT_CENTER = { lat: 44.2312, lng: -76.4860 };
 
@@ -24,6 +26,8 @@ export default function App() {
   const [query, setQuery] = useState<string>('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [parkingLots, setParkingLots] = useState<ParkingLotArea[]>([]);
+  const [parkingLotsError, setParkingLotsError] = useState<string | null>(null);
 
   const now = useMemo(() => new Date(), []);
 
@@ -59,6 +63,16 @@ export default function App() {
     }
   }, [apiKey]);
 
+  useEffect(() => {
+    try {
+      const lots = parseParkingLotAreas(parkingLotsCsv);
+      setParkingLots(lots);
+      setParkingLotsError(null);
+    } catch {
+      setParkingLotsError('Could not load Parking_Lot_Areas.csv');
+    }
+  }, []);
+
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
 
   const onLocateMe = () => {
@@ -90,16 +104,22 @@ export default function App() {
 
   const ariaStatusId = 'app-status';
 
+  const filteredParkingLots = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return parkingLots;
+    return parkingLots.filter((l) => {
+      const hay = `${l.lotName ?? ''} ${l.ownership ?? ''} ${l.mapLabel ?? ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [parkingLots, query]);
+
   return (
     <div className="container">
       <aside className="sidebar" aria-label="Search and results">
         <div className="header">
           <div className="brand">
             <h1>KingstonAccess</h1>
-            <p>Accessible parking finder + availability hint (MVP)</p>
-          </div>
-          <div className="badge" aria-label="Prototype badge">
-            MVP
+            <p>Accessible parking finder + availability hint</p>
           </div>
         </div>
 
@@ -211,6 +231,50 @@ export default function App() {
           </div>
         </div>
 
+        <div className="card" role="region" aria-label="Parking lot areas dataset">
+          <div className="label">Parking lots ({filteredParkingLots.length})</div>
+          {parkingLotsError ? <div className="help">{parkingLotsError}</div> : null}
+          <div className="list" role="list">
+            {filteredParkingLots.map((l) => {
+              const handicap = l.handicapSpace ?? '—';
+              const capacity = l.capacity ?? '—';
+
+              return (
+                <div key={l.id} className="item" role="listitem">
+                  <div className="itemHeader">
+                    <div>
+                      <div className="itemTitle">{l.lotName ?? 'Unnamed lot'}</div>
+                      <div className="itemMeta">
+                        Owner: {l.ownership ?? '—'}
+                        <br />
+                        Capacity: {capacity}
+                        <br />
+                        Accessible spaces: {handicap}
+                      </div>
+                    </div>
+                    <div className="chip" aria-label="City dataset">City dataset</div>
+                  </div>
+
+                  <div style={{ height: 10 }} />
+
+                  <div className="row">
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${l.lotName ?? l.mapLabel ?? 'parking'} Kingston ON`)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <button type="button" className="secondary">Open in Google Maps</button>
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+            {filteredParkingLots.length === 0 ? (
+              <div className="help">No parking lots match your search.</div>
+            ) : null}
+          </div>
+        </div>
+
         <div className="help">
           Data note: currently using a small built-in demo dataset. Replace with Open Data Kingston feed when available.
         </div>
@@ -239,7 +303,9 @@ export default function App() {
               mapContainerStyle={{ width: '100%', height: '100%' }}
               center={userPos ?? DEFAULT_CENTER}
               zoom={14}
-              onLoad={(map) => (mapRef.current = map)}
+              onLoad={(map) => {
+                mapRef.current = map;
+              }}
               options={{
                 clickableIcons: false,
                 streetViewControl: false,

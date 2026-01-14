@@ -14,3 +14,17 @@ export type AvailabilityPrediction = {
   label: 'High' | 'Medium' | 'Low';
   rationale: string;
 };
+
+export type ParkingLotArea = {
+  id: string;
+  objectId?: string;
+  lotId?: string;
+  lotName?: string;
+  capacity?: string;
+  controlType?: string;
+  handicapSpace?: string;
+  ownership?: string;
+  mapLabel?: string;
+  shapeLength?: string;
+  shapeArea?: string;
+};
