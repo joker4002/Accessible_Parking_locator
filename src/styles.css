@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --bg: #0b1220;
   --panel: #0f1b33;
   --text: #f3f6ff;
@@ -67,7 +67,7 @@ a {
   flex-direction: column;
   gap: 12px;
   height: 100vh;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .sidebarTop {
@@ -75,16 +75,22 @@ a {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: rgba(11, 18, 32, 0.92);
+  backdrop-filter: blur(10px);
+  padding-bottom: 12px;
 }
 
 .sidebarScroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding-right: 4px;
+  padding-right: 0;
 }
 
 .header {
@@ -157,6 +163,11 @@ select {
   color: var(--text);
 }
 
+select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -218,6 +229,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+  align-items: flex-start;
 }
 
 .itemTitle {
@@ -241,6 +253,8 @@ button:disabled {
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chip.good {

@@ -48,6 +48,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'results' | 'lots'>('results');
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
   const [travelMode, setTravelMode] = useState<TravelModeKey>('DRIVING');
+  const [lastRoute, setLastRoute] = useState<{ destination: { lat: number; lng: number }; label: string } | null>(null);
 
   const now = useMemo(() => new Date(), []);
 
@@ -190,6 +191,10 @@ export default function App() {
           mapRef.current.setCenter(next);
           mapRef.current.setZoom(16);
         }
+
+        if (lastRoute) {
+          routeTo(lastRoute.destination, lastRoute.label, next);
+        }
       },
       (err) => {
         if (err.code === err.PERMISSION_DENIED) {
@@ -262,12 +267,13 @@ export default function App() {
     setStatusMsg('Route cleared.');
   };
 
-  const routeTo = (destination: { lat: number; lng: number }, label: string) => {
+  const routeTo = (destination: { lat: number; lng: number }, label: string, originOverride?: { lat: number; lng: number }) => {
     if (!isLoaded || !apiKey) {
       setStatusMsg('Map is still loading. Try again in a moment.');
       return;
     }
-    if (!userPos) {
+    const origin = originOverride ?? userPos;
+    if (!origin) {
       setStatusMsg('Click “Locate me” first to enable in-app navigation.');
       return;
     }
@@ -275,7 +281,7 @@ export default function App() {
     const svc = new google.maps.DirectionsService();
     svc.route(
       {
-        origin: userPos,
+        origin,
         destination,
         travelMode: google.maps.TravelMode[travelMode],
         provideRouteAlternatives: false
@@ -287,12 +293,29 @@ export default function App() {
         }
 
         setDirections(result);
+        setLastRoute({ destination, label });
         const b = result.routes?.[0]?.bounds;
         if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
         setStatusMsg(`Route to ${label} shown on map.`);
       }
     );
   };
+
+  const accessibleLotCentroids = useMemo(() => {
+    const out: Record<string, { lat: number; lng: number }> = {};
+    for (const [id, geom] of Object.entries(parkingLotGeometries)) {
+      const b = new google.maps.LatLngBounds();
+      for (const poly of geom.polygons) {
+        for (const ring of poly) {
+          for (const pt of ring) b.extend(pt);
+        }
+      }
+      if (b.isEmpty()) continue;
+      const c = b.getCenter();
+      out[id] = { lat: c.lat(), lng: c.lng() };
+    }
+    return out;
+  }, [parkingLotGeometries]);
 
   const routeSummary = useMemo(() => {
     const leg = directions?.routes?.[0]?.legs?.[0];
@@ -359,49 +382,6 @@ export default function App() {
             </div>
 
           </div>
-
-          {routeSummary ? (
-            <div className="card" role="region" aria-label="Navigation directions">
-              <div className="label">Navigation</div>
-              <div className="itemMeta">
-                Distance: {routeSummary.distance || '—'}
-                <br />
-                Time: {routeSummary.duration || '—'}
-              </div>
-
-              <div style={{ height: 10 }} />
-
-              <div className="list" role="list">
-                {routeSummary.steps.map((st, idx) => {
-                  const t = st.transitSummary;
-                  return (
-                    <div key={idx} className="item" role="listitem">
-                      <div className="itemTitle">Step {idx + 1}</div>
-                      <div className="itemMeta">
-                        {t ? (
-                          <>
-                            {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
-                            {t.headsign ? ` toward ${t.headsign}` : ''}
-                            <br />
-                            From: {t.from ?? '—'}
-                            <br />
-                            To: {t.to ?? '—'}
-                            <br />
-                            Stops: {typeof t.stops === 'number' ? t.stops : '—'}
-                            <br />
-                          </>
-                        ) : null}
-                        {st.instruction || '—'}
-                        <br />
-                        {st.distance ? `Distance: ${st.distance}` : null}
-                        {st.duration ? ` • Time: ${st.duration}` : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
 
           <div className="card" role="region" aria-label="Search controls">
             <div className="label" id="search-label">Search</div>
@@ -476,6 +456,49 @@ export default function App() {
         </div>
 
         <div className="sidebarScroll" aria-label="Lists">
+          {routeSummary ? (
+            <div className="card" role="region" aria-label="Navigation directions">
+              <div className="label">Navigation</div>
+              <div className="itemMeta">
+                Distance: {routeSummary.distance || '—'}
+                <br />
+                Time: {routeSummary.duration || '—'}
+              </div>
+
+              <div style={{ height: 10 }} />
+
+              <div className="list" role="list">
+                {routeSummary.steps.map((st, idx) => {
+                  const t = st.transitSummary;
+                  return (
+                    <div key={idx} className="item" role="listitem">
+                      <div className="itemTitle">Step {idx + 1}</div>
+                      <div className="itemMeta">
+                        {t ? (
+                          <>
+                            {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
+                            {t.headsign ? ` toward ${t.headsign}` : ''}
+                            <br />
+                            From: {t.from ?? '—'}
+                            <br />
+                            To: {t.to ?? '—'}
+                            <br />
+                            Stops: {typeof t.stops === 'number' ? t.stops : '—'}
+                            <br />
+                          </>
+                        ) : null}
+                        {st.instruction || '—'}
+                        <br />
+                        {st.distance ? `Distance: ${st.distance}` : null}
+                        {st.duration ? ` • Time: ${st.duration}` : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           <div className="tabs" role="tablist" aria-label="List tabs">
             <button
               type="button"
@@ -694,11 +717,37 @@ export default function App() {
                 <DirectionsRenderer
                   directions={directions}
                   options={{
-                    preserveViewport: true,
+                    preserveViewport: false,
                     suppressMarkers: false
                   }}
                 />
               ) : null}
+
+              {Object.entries(accessibleLotCentroids).map(([id, pos]) => {
+                const lot = parkingLotById.get(id);
+                const handicapN = Number.parseInt(String(lot?.handicapSpace ?? '').trim(), 10);
+                const hasAccessible = Number.isFinite(handicapN) && handicapN > 0;
+                if (!hasAccessible) return null;
+
+                return (
+                  <MarkerF
+                    key={`acc-${id}`}
+                    position={pos}
+                    title={lot?.lotName ?? 'Accessible parking'}
+                    label={{
+                      text: '♿',
+                      color: '#111827',
+                      fontSize: '16px',
+                      fontWeight: '700'
+                    }}
+                    zIndex={10}
+                    onClick={() => {
+                      setSelectedParkingLotId(id);
+                      setStatusMsg(`Selected: ${lot?.lotName ?? 'Parking lot'}`);
+                    }}
+                  />
+                );
+              })}
 
               {userPos ? (
                 <MarkerF
