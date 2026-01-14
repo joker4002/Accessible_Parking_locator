@@ -1,7 +1,7 @@
 import { DirectionsRenderer, GoogleMap, InfoWindowF, MarkerF, PolygonF, useJsApiLoader } from '@react-google-maps/api';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { BackboardHttpError, backboardGetOrCreateThread, backboardResetThread, backboardSendMessage } from './backboard';
 import { haversineMeters, formatDistance } from './geo';
-import { MOCK_SPOTS } from './mockData';
 import parkingLotsCsv from './Parking_Lot_Areas.csv?raw';
 import parkingLotsGeoJson from './Parking_Lot_Areas.geojson?raw';
 import { parseParkingLotAreas } from './parkingLots.ts';
@@ -16,7 +16,12 @@ const KINGSTON_VIEWBOX = {
   bottom: 44.10
 };
 
-type SpotWithDistance = ParkingSpot & { distanceMeters: number };
+type SpotWithDistance = ParkingSpot & {
+  distanceMeters: number;
+  handicapSpace?: string;
+  ownership?: string;
+  capacity?: string;
+};
 
 type ParkingLotGeometry = {
   // A lot can be MultiPolygon: [polygonIndex][ringIndex][pointIndex]
@@ -30,7 +35,9 @@ function stripHtml(input: string): string {
 }
 
 export default function App() {
-  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
+  const apiKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined)?.trim();
+  const backboardLlmProvider = ((import.meta.env.VITE_BACKBOARD_LLM_PROVIDER as string | undefined) ?? 'google').trim();
+  const backboardModelName = ((import.meta.env.VITE_BACKBOARD_MODEL_NAME as string | undefined) ?? 'gemini-2.5-flash').trim();
 
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'kingstonaccess-google-maps',
@@ -49,7 +56,7 @@ export default function App() {
   const [placeSuggestions, setPlaceSuggestions] = useState<Array<{ label: string; lat: number; lng: number }>>([]);
   const [isSearchingPlaces, setIsSearchingPlaces] = useState<boolean>(false);
   const [placeSelected, setPlaceSelected] = useState<boolean>(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [destinationLabel, setDestinationLabel] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [onlyAccessibleLots, setOnlyAccessibleLots] = useState<boolean>(true);
   const [parkingLots, setParkingLots] = useState<ParkingLotArea[]>([]);
@@ -60,62 +67,302 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'results' | 'lots'>('results');
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
   const [travelMode, setTravelMode] = useState<TravelModeKey>('DRIVING');
-  const [lastRoute, setLastRoute] = useState<{ destination: { lat: number; lng: number }; label: string } | null>(null);
+  const [lastRoute, setLastRoute] = useState<{ destination: { lat: number; lng: number }; label: string; viaAccessibleSpot?: boolean } | null>(null);
+  const [routeWaypoint, setRouteWaypoint] = useState<
+    | { lat: number; lng: number; label: string; kind: 'lot'; id: string }
+    | null
+  >(null);
+  const [aiAdvice, setAiAdvice] = useState<string | null>(null);
+  const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiChatMessages, setAiChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [aiChatInput, setAiChatInput] = useState<string>('');
+  const [aiChatError, setAiChatError] = useState<string | null>(null);
+  const [isAiChatLoading, setIsAiChatLoading] = useState<boolean>(false);
+  const [nearestOptions, setNearestOptions] = useState<
+    Array<{ id: string; kind: 'lot'; label: string; lat: number; lng: number; distanceMeters: number; meta?: string }>
+  >([]);
+  const [isNearestLoading, setIsNearestLoading] = useState<boolean>(false);
+  const [nearestError, setNearestError] = useState<string | null>(null);
+  const [busyPrediction, setBusyPrediction] = useState<{ busy: boolean; probability: number; rationale: string } | null>(null);
 
   const now = useMemo(() => new Date(), []);
 
+  const parkingLotById = useMemo(() => {
+    const m = new Map<string, ParkingLotArea>();
+    for (const l of parkingLots) m.set(l.id, l);
+    return m;
+  }, [parkingLots]);
+
+  const lotCentroidsWithAccessibleSpaces = useMemo(() => {
+    const out: Record<string, { lat: number; lng: number }> = {};
+
+    for (const [id, geom] of Object.entries(parkingLotGeometries)) {
+      const lot = parkingLotById.get(id);
+      const handicapN = Number.parseInt(String(lot?.handicapSpace ?? '').trim(), 10);
+      const hasAccessible = Number.isFinite(handicapN) && handicapN > 0;
+      if (!hasAccessible) continue;
+
+      let minLat = Number.POSITIVE_INFINITY;
+      let maxLat = Number.NEGATIVE_INFINITY;
+      let minLng = Number.POSITIVE_INFINITY;
+      let maxLng = Number.NEGATIVE_INFINITY;
+
+      for (const polygon of geom.polygons) {
+        for (const ring of polygon) {
+          for (const pt of ring) {
+            if (!Number.isFinite(pt.lat) || !Number.isFinite(pt.lng)) continue;
+            minLat = Math.min(minLat, pt.lat);
+            maxLat = Math.max(maxLat, pt.lat);
+            minLng = Math.min(minLng, pt.lng);
+            maxLng = Math.max(maxLng, pt.lng);
+          }
+        }
+      }
+
+      if (!Number.isFinite(minLat) || !Number.isFinite(maxLat) || !Number.isFinite(minLng) || !Number.isFinite(maxLng)) continue;
+      out[id] = { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+    }
+
+    return out;
+  }, [parkingLotGeometries, parkingLotById]);
+
   const spots: SpotWithDistance[] = useMemo(() => {
     const origin = userPos ?? refPos ?? DEFAULT_CENTER;
-    const computed = MOCK_SPOTS.map((s) => ({
-      ...s,
-      distanceMeters: haversineMeters(origin, { lat: s.lat, lng: s.lng })
-    })).sort((a, b) => a.distanceMeters - b.distanceMeters);
-
     const radM = radiusKm * 1000;
-    const filteredByRadius = computed.filter((s) => s.distanceMeters <= radM);
-
     const q = filterQuery.trim().toLowerCase();
-    if (!q) return filteredByRadius;
 
-    return filteredByRadius.filter((s) => {
+    const computed = parkingLots
+      .map((l): SpotWithDistance | null => {
+        const handicapN = Number.parseInt(String(l.handicapSpace ?? '').trim(), 10);
+        const hasAccessible = Number.isFinite(handicapN) && handicapN > 0;
+        if (!hasAccessible) return null;
+
+        const pos = lotCentroidsWithAccessibleSpaces[l.id] ?? parkingLotMarkers[l.id];
+        if (!pos) return null;
+
+        const name = l.lotName ?? l.mapLabel ?? 'Accessible parking lot';
+        const distanceMeters = haversineMeters(origin, pos);
+
+        const isDowntown = pos.lat >= 44.225 && pos.lat <= 44.245 && pos.lng >= -76.52 && pos.lng <= -76.47;
+        const zone = isDowntown ? 'Downtown' : undefined;
+
+        const description =
+          `Owner: ${l.ownership ?? '—'}\n` +
+          `Capacity: ${l.capacity ?? '—'}\n` +
+          `Accessible spaces: ${l.handicapSpace ?? '—'}`;
+
+        return {
+          id: l.id,
+          name,
+          lat: pos.lat,
+          lng: pos.lng,
+          description,
+          ...(zone ? { zone } : {}),
+          handicapSpace: l.handicapSpace,
+          ownership: l.ownership,
+          capacity: l.capacity,
+          distanceMeters
+        };
+      })
+      .filter((v): v is SpotWithDistance => v !== null)
+      .filter((s) => s.distanceMeters <= radM)
+      .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+    if (!q) return computed;
+
+    return computed.filter((s) => {
       const hay = `${s.name} ${s.zone ?? ''} ${s.description ?? ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [userPos, refPos, radiusKm, filterQuery]);
+  }, [userPos, refPos, radiusKm, filterQuery, parkingLots, lotCentroidsWithAccessibleSpaces, parkingLotMarkers]);
 
-  const selectedSpot = useMemo(() => {
-    if (!selectedId) return null;
-    return spots.find((s) => s.id === selectedId) ?? null;
-  }, [selectedId, spots]);
+  const findNearestAccessibleParkingTo = (
+    destination: { lat: number; lng: number },
+    opts?: { preferLots?: boolean }
+  ) => {
+    let bestLot: { id: string; lat: number; lng: number; distanceMeters: number; label: string; kind: 'lot' } | null = null;
 
-  const autoSelectNearestSpotTo = (destination: { lat: number; lng: number }) => {
-    let bestId: string | null = null;
-    let bestDist = Number.POSITIVE_INFINITY;
-    let bestPos: { lat: number; lng: number } | null = null;
-
-    for (const s of MOCK_SPOTS) {
-      const d = haversineMeters(destination, { lat: s.lat, lng: s.lng });
-      if (d < bestDist) {
-        bestDist = d;
-        bestId = s.id;
-        bestPos = { lat: s.lat, lng: s.lng };
+    for (const [lotId, pos] of Object.entries(lotCentroidsWithAccessibleSpaces)) {
+      const lot = parkingLotById.get(lotId);
+      const label = lot?.lotName ?? lot?.mapLabel ?? 'Accessible parking lot';
+      const d = haversineMeters(destination, pos);
+      if (!bestLot || d < bestLot.distanceMeters) {
+        bestLot = { id: lotId, lat: pos.lat, lng: pos.lng, distanceMeters: d, label, kind: 'lot' };
       }
     }
 
-    if (!bestId || !bestPos) return;
-    setSelectedId(bestId);
+    if (opts?.preferLots) return bestLot;
+    return bestLot;
+  };
+
+  const onSendAiChat = async () => {
+    const msg = aiChatInput.trim();
+    if (!msg) return;
+
+    setIsAiChatLoading(true);
+    setAiChatError(null);
+    setAiChatInput('');
+    setAiChatMessages((prev) => [...prev, { role: 'user', content: msg }]);
+
+    try {
+      const { thread_id } = await backboardGetOrCreateThread();
+      const res = await backboardSendMessage({
+        thread_id,
+        content: msg,
+        memory: 'Auto',
+        web_search: 'off',
+        llm_provider: backboardLlmProvider,
+        model_name: backboardModelName
+      });
+
+      const text = (res.content ?? '').trim();
+      const looksLikeQuotaError = /LLM Invocation Error|insufficient_quota|exceeded your current quota/i.test(text);
+      if (!text || looksLikeQuotaError) {
+        setAiChatError(
+          `AI error. Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
+            'Backboard returned a quota/provider error. Enable the provider in Backboard dashboard or switch to a provider/model that is enabled for this API key.'
+        );
+        return;
+      }
+
+      setAiChatMessages((prev) => [...prev, { role: 'assistant', content: text }]);
+    } catch (e) {
+      if (e instanceof BackboardHttpError) {
+        setAiChatError(e.message);
+      } else {
+        setAiChatError(
+          ((e as Error).message || 'AI request failed') +
+            '. If this says “Failed to fetch”, start the local API server: `node server.mjs`.'
+        );
+      }
+    } finally {
+      setIsAiChatLoading(false);
+    }
+  };
+
+  const autoSelectNearestSpotTo = (destination: { lat: number; lng: number }) => {
+    const best = findNearestAccessibleParkingTo(destination, { preferLots: true });
+    if (!best) return;
+
+    setSelectedParkingLotId(best.id);
 
     const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
     if (mapRef.current && gmaps) {
       const b = new gmaps.LatLngBounds();
       b.extend(destination);
-      b.extend(bestPos);
+      b.extend({ lat: best.lat, lng: best.lng });
       mapRef.current.fitBounds(b, 72);
     } else if (mapRef.current) {
-      mapRef.current.panTo(bestPos);
+      mapRef.current.panTo({ lat: best.lat, lng: best.lng });
     }
 
-    setStatusMsg(`Nearest accessible parking selected (${formatDistance(bestDist)}).`);
+    setStatusMsg(`Nearest accessible parking selected (${formatDistance(best.distanceMeters)}).`);
+  };
+
+  const getNearestAccessibleOptionsTo = (
+    destination: { lat: number; lng: number },
+    limit: number
+  ): Array<{ id: string; kind: 'lot'; label: string; lat: number; lng: number; distanceMeters: number; meta?: string }> => {
+    const out: Array<{ id: string; kind: 'lot'; label: string; lat: number; lng: number; distanceMeters: number; meta?: string }> = [];
+
+    for (const [lotId, pos] of Object.entries(lotCentroidsWithAccessibleSpaces)) {
+      const lot = parkingLotById.get(lotId);
+      const label = lot?.lotName ?? lot?.mapLabel ?? 'Accessible parking lot';
+      const handicap = lot?.handicapSpace ?? '';
+      const d = haversineMeters(destination, pos);
+      out.push({
+        id: lotId,
+        kind: 'lot',
+        label,
+        lat: pos.lat,
+        lng: pos.lng,
+        distanceMeters: d,
+        meta: handicap ? `Accessible spaces: ${handicap}` : undefined
+      });
+    }
+
+    out.sort((a, b) => a.distanceMeters - b.distanceMeters);
+    return out.slice(0, Math.max(0, limit));
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      if (!refPos) {
+        setNearestOptions([]);
+        setNearestError(null);
+        setBusyPrediction(null);
+        return;
+      }
+
+      setIsNearestLoading(true);
+      setNearestError(null);
+
+      try {
+        const nearestRes = await fetch(
+          `/api/nearest?lat=${encodeURIComponent(refPos.lat)}&lng=${encodeURIComponent(refPos.lng)}&limit=5`
+        );
+        if (!nearestRes.ok) throw new Error(`Nearest API failed (${nearestRes.status})`);
+        const nearestJson = (await nearestRes.json()) as {
+          options?: Array<{ id: string; label: string; lat: number; lng: number; handicapSpace?: string; distanceMeters?: number }>;
+        };
+        const options = (nearestJson.options ?? []).map((o) => ({
+          id: o.id,
+          kind: 'lot' as const,
+          label: o.label,
+          lat: o.lat,
+          lng: o.lng,
+          distanceMeters: o.distanceMeters ?? haversineMeters(refPos, { lat: o.lat, lng: o.lng }),
+          meta: o.handicapSpace ? `Accessible spaces: ${o.handicapSpace}` : undefined
+        }));
+        setNearestOptions(options);
+
+        const predRes = await fetch(`/api/predict?lat=${encodeURIComponent(refPos.lat)}&lng=${encodeURIComponent(refPos.lng)}`);
+        if (!predRes.ok) throw new Error(`Predict API failed (${predRes.status})`);
+        const predJson = (await predRes.json()) as { busy?: boolean; probability?: number; rationale?: string };
+        if (typeof predJson.busy === 'boolean' && typeof predJson.probability === 'number') {
+          setBusyPrediction({ busy: predJson.busy, probability: predJson.probability, rationale: predJson.rationale ?? '' });
+        } else {
+          setBusyPrediction(null);
+        }
+      } catch (e) {
+        setNearestError(
+          ((e as Error).message || 'API error') +
+            '. If the API server is not running, start it: `node server.mjs` (port 8787).'
+        );
+        setNearestOptions(getNearestAccessibleOptionsTo(refPos, 5));
+        setBusyPrediction({
+          busy: isBusyNow(refPos),
+          probability: isBusyNow(refPos) ? 0.35 : 0.7,
+          rationale: isBusyNow(refPos)
+            ? 'Saturday morning downtown tends to be busiest.'
+            : 'Typical availability expected for this area.'
+        });
+      } finally {
+        setIsNearestLoading(false);
+      }
+    };
+
+    void run();
+  }, [refPos]);
+
+  const isBusyNow = (dest: { lat: number; lng: number }) => {
+    const d = new Date();
+    const isSaturday = d.getDay() === 6;
+    const hour = d.getHours();
+    const isMorning = hour >= 9 && hour <= 12;
+    const isDowntown = dest.lat >= 44.225 && dest.lat <= 44.245 && dest.lng >= -76.52 && dest.lng <= -76.47;
+    return isSaturday && isMorning && isDowntown;
+  };
+
+  const reportData = async (payload: unknown) => {
+    try {
+      const text = JSON.stringify(payload, null, 2);
+      await navigator.clipboard.writeText(text);
+      setStatusMsg('Copied report details to clipboard.');
+    } catch {
+      setStatusMsg('Could not copy report details.');
+    }
   };
 
   useEffect(() => {
@@ -170,12 +417,6 @@ export default function App() {
       // If parsing fails, we simply won't render polygons.
     }
   }, []);
-
-  const parkingLotById = useMemo(() => {
-    const m = new Map<string, ParkingLotArea>();
-    for (const l of parkingLots) m.set(l.id, l);
-    return m;
-  }, [parkingLots]);
 
   const geocodeParkingLot = async (lot: ParkingLotArea): Promise<{ lat: number; lng: number }> => {
     const cached = parkingLotMarkers[lot.id];
@@ -285,6 +526,8 @@ export default function App() {
     setActiveTab('results');
     setPlaceSuggestions([]);
     setPlaceSelected(true);
+    setDestinationLabel(label ?? null);
+    setRouteWaypoint(null);
     if (label) setStatusMsg(`Selected: ${label}`);
 
     if (mapRef.current) {
@@ -385,11 +628,14 @@ export default function App() {
 
     const next = { lat: c.lat(), lng: c.lng() };
     setUserPos(next);
-    setRefPos(null);
     setStatusMsg('Using map center as your location.');
 
     if (lastRoute) {
-      routeTo(lastRoute.destination, lastRoute.label, next);
+      if (lastRoute.viaAccessibleSpot) {
+        routeToViaAccessibleSpot(lastRoute.destination, lastRoute.label, next);
+      } else {
+        routeTo(lastRoute.destination, lastRoute.label, next);
+      }
     }
   };
 
@@ -404,7 +650,6 @@ export default function App() {
       (pos) => {
         const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserPos(next);
-        setRefPos(null);
         setStatusMsg('Location updated. Showing nearest accessible parking.');
         if (mapRef.current) {
           mapRef.current.setCenter(next);
@@ -412,7 +657,11 @@ export default function App() {
         }
 
         if (lastRoute) {
-          routeTo(lastRoute.destination, lastRoute.label, next);
+          if (lastRoute.viaAccessibleSpot) {
+            routeToViaAccessibleSpot(lastRoute.destination, lastRoute.label, next);
+          } else {
+            routeTo(lastRoute.destination, lastRoute.label, next);
+          }
         }
       },
       (err) => {
@@ -437,6 +686,7 @@ export default function App() {
   const onCenterKingston = () => {
     setUserPos(null);
     setRefPos(null);
+    setDestinationLabel(null);
     setStatusMsg('Centered on Downtown Kingston.');
     if (mapRef.current) mapRef.current.panTo(DEFAULT_CENTER);
   };
@@ -501,7 +751,83 @@ export default function App() {
 
   const clearRoute = () => {
     setDirections(null);
+    setRouteWaypoint(null);
     setStatusMsg('Route cleared.');
+  };
+
+  const onAskAiAdvice = async () => {
+    if (!refPos) {
+      setAiError('Select a destination first.');
+      return;
+    }
+
+    setIsAiLoading(true);
+    setAiError(null);
+    try {
+      const { thread_id } = await backboardGetOrCreateThread();
+
+      const originText = userPos ? `User location: (${userPos.lat.toFixed(5)}, ${userPos.lng.toFixed(5)})` : 'User location: unknown';
+      const destinationText = `Destination: ${destinationLabel ?? 'Selected destination'} (${refPos.lat.toFixed(5)}, ${refPos.lng.toFixed(5)})`;
+      const waypointText = routeWaypoint
+        ? `Chosen accessible parking waypoint: ${routeWaypoint.label} (${routeWaypoint.lat.toFixed(5)}, ${routeWaypoint.lng.toFixed(5)})`
+        : 'Chosen accessible parking waypoint: not computed yet';
+      const modeText = `Travel mode: ${travelMode}`;
+
+      const prompt =
+        `You are helping a wheelchair user in Kingston, Ontario.\n` +
+        `${originText}\n` +
+        `${destinationText}\n` +
+        `${waypointText}\n` +
+        `${modeText}\n\n` +
+        `Task: Give short bullet-point advice for the best accessible parking stop (near the destination), and estimate the chance of finding an accessible spot now. ` +
+        `If the waypoint seems suboptimal, suggest a better alternative near the destination. Keep it concise.`;
+
+      const res = await backboardSendMessage({
+        thread_id,
+        content: prompt,
+        memory: 'Auto',
+        web_search: 'off',
+        llm_provider: backboardLlmProvider,
+        model_name: backboardModelName
+      });
+
+      const text = (res.content ?? '').trim();
+      if (!text) {
+        setAiError('AI response was empty.');
+        return;
+      }
+
+      const looksLikeQuotaError = /LLM Invocation Error|insufficient_quota|exceeded your current quota/i.test(text);
+      if (looksLikeQuotaError) {
+        setAiAdvice(null);
+        setAiError(
+          `AI quota/provider error. Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
+            'Backboard returned an LLM invocation error (quota/billing). Fix: in Backboard dashboard, enable the chosen provider (and billing/keys) or switch to a provider/model that is enabled for this API key; then restart the dev server and click “Reset AI”.'
+        );
+        return;
+      }
+
+      setAiAdvice(text);
+    } catch (e) {
+      if (e instanceof BackboardHttpError) {
+        if (e.status === 429) {
+          setAiError(
+            `AI quota exceeded (429). Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
+              'Backboard is still returning an OpenAI-style insufficient_quota error, which usually means the chosen provider is not configured/available for this Backboard API key, or it is falling back to OpenAI internally. ' +
+              'Fix: In Backboard dashboard, ensure the provider is enabled (and billing/keys are set). Then restart the dev server and click “Reset AI”.'
+          );
+          return;
+        }
+        setAiError(e.message);
+        return;
+      }
+      setAiError(
+        ((e as Error).message || 'AI request failed') +
+          '. If this says “Failed to fetch”, start the local API server: `node server.mjs`.'
+      );
+    } finally {
+      setIsAiLoading(false);
+    }
   };
 
   const routeTo = (destination: { lat: number; lng: number }, label: string, originOverride?: { lat: number; lng: number }) => {
@@ -516,13 +842,20 @@ export default function App() {
     }
 
     const svc = new google.maps.DirectionsService();
+    const request: google.maps.DirectionsRequest = {
+      origin,
+      destination,
+      travelMode: google.maps.TravelMode[travelMode],
+      provideRouteAlternatives: false
+    };
+    if (travelMode === 'DRIVING') {
+      (request as unknown as { drivingOptions?: unknown }).drivingOptions = {
+        departureTime: new Date(),
+        trafficModel: 'bestguess'
+      };
+    }
     svc.route(
-      {
-        origin,
-        destination,
-        travelMode: google.maps.TravelMode[travelMode],
-        provideRouteAlternatives: false
-      },
+      request,
       (result, status) => {
         if (status !== 'OK' || !result) {
           setStatusMsg('Could not compute a route. Try again.');
@@ -530,7 +863,8 @@ export default function App() {
         }
 
         setDirections(result);
-        setLastRoute({ destination, label });
+        setRouteWaypoint(null);
+        setLastRoute({ destination, label, viaAccessibleSpot: false });
         const b = result.routes?.[0]?.bounds;
         if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
         setStatusMsg(`Route to ${label} shown on map.`);
@@ -538,78 +872,153 @@ export default function App() {
     );
   };
 
-  const accessibleLotCentroids = useMemo(() => {
-    const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
-    if (!isLoaded || !gmaps) return {};
-
-    const out: Record<string, { lat: number; lng: number }> = {};
-    for (const [id, geom] of Object.entries(parkingLotGeometries)) {
-      const b = new gmaps.LatLngBounds();
-      for (const poly of geom.polygons) {
-        for (const ring of poly) {
-          for (const pt of ring) b.extend(pt);
-        }
-      }
-      if (b.isEmpty()) continue;
-      const c = b.getCenter();
-      out[id] = { lat: c.lat(), lng: c.lng() };
+  const routeToViaAccessibleSpot = (destination: { lat: number; lng: number }, label: string, originOverride?: { lat: number; lng: number }) => {
+    if (!isLoaded || !apiKey) {
+      setStatusMsg('Map is still loading. Try again in a moment.');
+      return;
     }
-    return out;
-  }, [parkingLotGeometries, isLoaded]);
+    const origin = originOverride ?? userPos;
+    if (!origin) {
+      setStatusMsg('Click “Locate me” first to enable in-app navigation.');
+      return;
+    }
+
+    const computedNearest = findNearestAccessibleParkingTo(destination, { preferLots: true });
+    const chosen = routeWaypoint ?? computedNearest;
+    if (!chosen) {
+      routeTo(destination, label, origin);
+      return;
+    }
+
+    setSelectedParkingLotId(chosen.id);
+    if (!routeWaypoint) {
+      setRouteWaypoint({ lat: chosen.lat, lng: chosen.lng, label: chosen.label, kind: 'lot', id: chosen.id });
+    }
+    const svc = new google.maps.DirectionsService();
+    const request: google.maps.DirectionsRequest = {
+      origin,
+      destination,
+      waypoints: [{ location: { lat: chosen.lat, lng: chosen.lng }, stopover: true }],
+      optimizeWaypoints: false,
+      travelMode: google.maps.TravelMode[travelMode],
+      provideRouteAlternatives: false
+    };
+    if (travelMode === 'DRIVING') {
+      (request as unknown as { drivingOptions?: unknown }).drivingOptions = {
+        departureTime: new Date(),
+        trafficModel: 'bestguess'
+      };
+    }
+    svc.route(
+      request,
+      (result, status) => {
+        if (status !== 'OK' || !result) {
+          setStatusMsg('Could not compute a route. Try again.');
+          return;
+        }
+
+        setDirections(result);
+        setLastRoute({ destination, label, viaAccessibleSpot: true });
+        const b = result.routes?.[0]?.bounds;
+        if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
+        setStatusMsg(`Route to ${label} via accessible parking shown on map.`);
+      }
+    );
+  };
+
+  const accessibleLotCentroids = lotCentroidsWithAccessibleSpaces;
 
   const routeSummary = useMemo(() => {
-    const leg = directions?.routes?.[0]?.legs?.[0];
-    if (!leg) return null;
+    const route = directions?.routes?.[0];
+    const legs = route?.legs ?? [];
+    if (legs.length === 0) return null;
 
-    const steps = (leg.steps ?? []).map((s) => {
-      const stepAny = s as unknown as {
-        travel_mode?: string;
-        html_instructions?: string;
-        instructions?: string;
-        distance?: { text?: string };
-        duration?: { text?: string };
-        transit?: {
-          num_stops?: number;
-          headsign?: string;
-          line?: {
-            short_name?: string;
-            name?: string;
-            vehicle?: { name?: string };
+    const totalDistanceM = legs.reduce((acc, l) => acc + (l.distance?.value ?? 0), 0);
+    const totalBaseDurationS = legs.reduce((acc, l) => acc + (l.duration?.value ?? 0), 0);
+    const totalDurationS = legs.reduce((acc, l) => {
+      const anyLeg = l as unknown as { duration_in_traffic?: { value?: number } };
+      const useTraffic = travelMode === 'DRIVING' && anyLeg.duration_in_traffic?.value != null;
+      return acc + (useTraffic ? (anyLeg.duration_in_traffic?.value ?? 0) : (l.duration?.value ?? 0));
+    }, 0);
+
+    const fmtM = (m: number) => {
+      if (!Number.isFinite(m)) return '';
+      if (m < 1000) return `${Math.round(m)} m`;
+      return `${(m / 1000).toFixed(1)} km`;
+    };
+    const fmtS = (s: number) => {
+      if (!Number.isFinite(s)) return '';
+      const mins = Math.round(s / 60);
+      if (mins < 60) return `${mins} min`;
+      const h = Math.floor(mins / 60);
+      const r = mins % 60;
+      return `${h} hr ${r} min`;
+    };
+
+    const legSummaries = legs.map((leg) => {
+      const anyLeg = leg as unknown as { duration_in_traffic?: { text?: string; value?: number } };
+      const steps = (leg.steps ?? []).map((s) => {
+        const stepAny = s as unknown as {
+          travel_mode?: string;
+          html_instructions?: string;
+          instructions?: string;
+          distance?: { text?: string };
+          duration?: { text?: string };
+          transit?: {
+            num_stops?: number;
+            headsign?: string;
+            line?: {
+              short_name?: string;
+              name?: string;
+              vehicle?: { name?: string };
+            };
+            departure_stop?: { name?: string };
+            arrival_stop?: { name?: string };
           };
-          departure_stop?: { name?: string };
-          arrival_stop?: { name?: string };
         };
+
+        const mode = stepAny.travel_mode ?? '';
+        const instructionRaw = stepAny.html_instructions ?? stepAny.instructions ?? '';
+        const instruction = stripHtml(instructionRaw);
+        const distance = stepAny.distance?.text ?? '';
+        const duration = stepAny.duration?.text ?? '';
+
+        const transit = stepAny.transit;
+        const transitSummary = transit
+          ? {
+              vehicle: transit.line?.vehicle?.name,
+              line: transit.line?.short_name ?? transit.line?.name,
+              headsign: transit.headsign,
+              from: transit.departure_stop?.name,
+              to: transit.arrival_stop?.name,
+              stops: transit.num_stops
+            }
+          : null;
+
+        return { mode, instruction, distance, duration, transitSummary };
+      });
+
+      return {
+        distance: leg.distance?.text ?? (leg.distance?.value != null ? fmtM(leg.distance.value) : ''),
+        duration:
+          (travelMode === 'DRIVING' ? anyLeg.duration_in_traffic?.text : undefined) ??
+          leg.duration?.text ??
+          (leg.duration?.value != null ? fmtS(leg.duration.value) : ''),
+        start: leg.start_address ?? '',
+        end: leg.end_address ?? '',
+        steps
       };
-
-      const mode = stepAny.travel_mode ?? '';
-      const instructionRaw = stepAny.html_instructions ?? stepAny.instructions ?? '';
-      const instruction = stripHtml(instructionRaw);
-      const distance = stepAny.distance?.text ?? '';
-      const duration = stepAny.duration?.text ?? '';
-
-      const transit = stepAny.transit;
-      const transitSummary = transit
-        ? {
-            vehicle: transit.line?.vehicle?.name,
-            line: transit.line?.short_name ?? transit.line?.name,
-            headsign: transit.headsign,
-            from: transit.departure_stop?.name,
-            to: transit.arrival_stop?.name,
-            stops: transit.num_stops
-          }
-        : null;
-
-      return { mode, instruction, distance, duration, transitSummary };
     });
 
     return {
-      distance: leg.distance?.text ?? '',
-      duration: leg.duration?.text ?? '',
-      start: leg.start_address ?? '',
-      end: leg.end_address ?? '',
-      steps
+      distance: route?.legs?.[0]?.distance?.text && legs.length === 1 ? legs[0].distance?.text ?? '' : fmtM(totalDistanceM),
+      duration: route?.legs?.[0]?.duration?.text && legs.length === 1 ? legs[0].duration?.text ?? '' : fmtS(totalDurationS),
+      durationBase: fmtS(totalBaseDurationS),
+      durationTraffic: fmtS(totalDurationS),
+      durationDelay: fmtS(Math.max(0, totalDurationS - totalBaseDurationS)),
+      legs: legSummaries
     };
-  }, [directions]);
+  }, [directions, travelMode]);
 
   return (
     <div className="container">
@@ -635,9 +1044,10 @@ export default function App() {
                 setQuery(next);
                 setPlaceSelected(false);
                 setRefPos(null);
+                setDestinationLabel(null);
                 setFilterQuery('');
               }}
-              onKeyDown={async (e) => {
+              onKeyDown={async (e: React.KeyboardEvent<HTMLInputElement>) => {
                 if (e.key !== 'Enter') return;
                 const raw = query.trim();
                 e.preventDefault();
@@ -667,16 +1077,7 @@ export default function App() {
                   try {
                     setStatusMsg('Search failed. Trying alternate lookup…');
                     const pos = await geocodeAddress(raw);
-                    setRefPos(pos);
-                    setFilterQuery('');
-                    setActiveTab('results');
-                    setPlaceSuggestions([]);
-                    if (mapRef.current) {
-                      mapRef.current.panTo(pos);
-                      mapRef.current.setZoom(15);
-                    }
-                    setStatusMsg('Place found. Selecting nearest accessible parking…');
-                    autoSelectNearestSpotTo(pos);
+                    selectPlace(pos, raw);
                   } catch {
                     setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
                   }
@@ -697,17 +1098,7 @@ export default function App() {
                     className="suggestionButton"
                     role="listitem"
                     onClick={() => {
-                      const pos = { lat: sug.lat, lng: sug.lng };
-                      setRefPos(pos);
-                      setFilterQuery('');
-                      setActiveTab('results');
-                      setPlaceSuggestions([]);
-                      if (mapRef.current) {
-                        mapRef.current.panTo(pos);
-                        mapRef.current.setZoom(15);
-                      }
-                      setStatusMsg('Place selected. Selecting nearest accessible parking…');
-                      autoSelectNearestSpotTo(pos);
+                      selectPlace({ lat: sug.lat, lng: sug.lng }, sug.label);
                     }}
                   >
                     {sug.label}
@@ -771,6 +1162,20 @@ export default function App() {
                   Clear route
                 </button>
               ) : null}
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  backboardResetThread();
+                  setAiAdvice(null);
+                  setAiError(null);
+                  setAiChatMessages([]);
+                  setAiChatError(null);
+                  setStatusMsg('AI thread reset.');
+                }}
+              >
+                Reset AI
+              </button>
             </div>
 
             <div style={{ height: 10 }} />
@@ -788,38 +1193,66 @@ export default function App() {
               <div className="itemMeta">
                 Distance: {routeSummary.distance || '—'}
                 <br />
-                Time: {routeSummary.duration || '—'}
+                {travelMode === 'DRIVING' ? (
+                  <>
+                    With traffic: {routeSummary.durationTraffic || routeSummary.duration || '—'}
+                    <br />
+                    Base: {routeSummary.durationBase || '—'}
+                    <br />
+                    Delay: {routeSummary.durationDelay || '—'}
+                  </>
+                ) : (
+                  <>Time: {routeSummary.duration || '—'}</>
+                )}
               </div>
 
               <div style={{ height: 10 }} />
 
               <div className="list" role="list">
-                {routeSummary.steps.map((st, idx) => {
-                  const t = st.transitSummary;
-                  return (
-                    <div key={idx} className="item" role="listitem">
-                      <div className="itemTitle">Step {idx + 1}</div>
+                {routeSummary.legs.flatMap((leg, legIdx) => {
+                  const header = (
+                    <div key={`leg-h-${legIdx}`} className="item" role="listitem">
+                      <div className="itemTitle">Leg {legIdx + 1}</div>
                       <div className="itemMeta">
-                        {t ? (
-                          <>
-                            {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
-                            {t.headsign ? ` toward ${t.headsign}` : ''}
-                            <br />
-                            From: {t.from ?? '—'}
-                            <br />
-                            To: {t.to ?? '—'}
-                            <br />
-                            Stops: {typeof t.stops === 'number' ? t.stops : '—'}
-                            <br />
-                          </>
-                        ) : null}
-                        {st.instruction || '—'}
+                        From: {leg.start || '—'}
                         <br />
-                        {st.distance ? `Distance: ${st.distance}` : null}
-                        {st.duration ? ` • Time: ${st.duration}` : null}
+                        To: {leg.end || '—'}
+                        <br />
+                        {leg.distance ? `Distance: ${leg.distance}` : 'Distance: —'}
+                        {leg.duration ? ` • Time: ${leg.duration}` : null}
                       </div>
                     </div>
                   );
+
+                  const steps = leg.steps.map((st, stepIdx) => {
+                    const t = st.transitSummary;
+                    return (
+                      <div key={`leg-${legIdx}-step-${stepIdx}`} className="item" role="listitem">
+                        <div className="itemTitle">Step {stepIdx + 1}</div>
+                        <div className="itemMeta">
+                          {t ? (
+                            <>
+                              {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
+                              {t.headsign ? ` toward ${t.headsign}` : ''}
+                              <br />
+                              From: {t.from ?? '—'}
+                              <br />
+                              To: {t.to ?? '—'}
+                              <br />
+                              Stops: {typeof t.stops === 'number' ? t.stops : '—'}
+                              <br />
+                            </>
+                          ) : null}
+                          {st.instruction || '—'}
+                          <br />
+                          {st.distance ? `Distance: ${st.distance}` : null}
+                          {st.duration ? ` • Time: ${st.duration}` : null}
+                        </div>
+                      </div>
+                    );
+                  });
+
+                  return [header, ...steps];
                 })}
               </div>
             </div>
@@ -850,6 +1283,138 @@ export default function App() {
             <div className="card" role="region" aria-label="Results list">
               <div className="label">Results ({spots.length})</div>
               <div className="list" role="list">
+                {refPos ? (
+                  <div className="item" role="listitem">
+                    <div className="itemHeader">
+                      <div>
+                        <div className="itemTitle">{destinationLabel ?? 'Selected destination'}</div>
+                        <div className="itemMeta">
+                          Destination
+                          <br />
+                          Lat: {refPos.lat.toFixed(5)}
+                          <br />
+                          Lng: {refPos.lng.toFixed(5)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="row">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusMsg(`Selected: ${destinationLabel ?? 'Destination'}`);
+                          if (mapRef.current) {
+                            mapRef.current.panTo(refPos);
+                            mapRef.current.setZoom(15);
+                          }
+                        }}
+                      >
+                        View on map
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => routeToViaAccessibleSpot(refPos, destinationLabel ?? 'Destination')}
+                      >
+                        Navigate (via accessible parking)
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={isAiLoading}
+                        onClick={onAskAiAdvice}
+                      >
+                        {isAiLoading ? 'AI…' : 'AI advice'}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          reportData({
+                            type: 'destination',
+                            label: destinationLabel ?? 'Selected destination',
+                            lat: refPos.lat,
+                            lng: refPos.lng
+                          });
+                        }}
+                      >
+                        Report data
+                      </button>
+                    </div>
+
+                    {aiError ? (
+                      <div className="itemMeta" style={{ marginTop: 10 }}>
+                        {aiError}
+                      </div>
+                    ) : null}
+
+                    {aiAdvice ? (
+                      <div className="itemMeta" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>
+                        {aiAdvice}
+                      </div>
+                    ) : null}
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="itemMeta">
+                      Nearest accessible options (Top 5)
+                      {busyPrediction?.busy ? ' • Busy now (heuristic)' : ''}
+                    </div>
+                    {nearestError ? (
+                      <div className="itemMeta" style={{ marginTop: 8 }}>
+                        {nearestError}
+                      </div>
+                    ) : null}
+                    {busyPrediction ? (
+                      <div className="itemMeta" style={{ marginTop: 8 }}>
+                        Availability hint: {Math.round(busyPrediction.probability * 100)}% • {busyPrediction.rationale}
+                      </div>
+                    ) : null}
+                    <div className="list" role="list">
+                      {isNearestLoading ? (
+                        <div className="help">Loading nearest options…</div>
+                      ) : nearestOptions.length === 0 ? (
+                        <div className="help">No accessible parking lots found.</div>
+                      ) : (
+                        nearestOptions.map((opt) => (
+                          <div key={`${opt.kind}-${opt.id}`} className="item" role="listitem">
+                            <div className="itemTitle">{opt.label}</div>
+                            <div className="itemMeta">
+                              Type: Parking lot
+                              <br />
+                              Distance: {formatDistance(opt.distanceMeters)}
+                              {opt.meta ? (
+                                <>
+                                  <br />
+                                  {opt.meta}
+                                </>
+                              ) : null}
+                            </div>
+                            <div style={{ height: 10 }} />
+                            <div className="row">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRouteWaypoint({ lat: opt.lat, lng: opt.lng, label: opt.label, kind: 'lot', id: opt.id });
+                                  if (mapRef.current) mapRef.current.panTo({ lat: opt.lat, lng: opt.lng });
+                                  setStatusMsg('Waypoint updated. Click Navigate again to reroute.');
+                                }}
+                              >
+                                Use as waypoint
+                              </button>
+                              <button type="button" className="secondary" onClick={() => reportData(opt)}>
+                                Report data
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
                 {spots.map((s) => {
                   const pred = predictAvailability(s, now);
                   const chipClass = pred.label === 'High' ? 'good' : pred.label === 'Medium' ? 'mid' : 'bad';
@@ -864,7 +1429,7 @@ export default function App() {
                         <div>
                           <div className="itemTitle">{s.name}</div>
                           <div className="itemMeta">
-                            Zone: {s.zone ?? '—'}
+                            Accessible spaces: {s.handicapSpace ?? '—'}
                             <br />
                             Distance: {formatDistance(s.distanceMeters)}
                           </div>
@@ -877,7 +1442,9 @@ export default function App() {
                       <div className="itemMeta">
                         {pred.rationale}
                         <br />
-                        Curb ramp: {s.hasCurbRamp === true ? 'Yes' : s.hasCurbRamp === false ? 'Unknown/No' : 'Unknown'}
+                        Owner: {s.ownership ?? '—'}
+                        <br />
+                        Capacity: {s.capacity ?? '—'}
                       </div>
 
                       <div style={{ height: 10 }} />
@@ -886,9 +1453,9 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => {
-                            setSelectedId(s.id);
+                            setSelectedParkingLotId(s.id);
                             setStatusMsg(`Selected: ${s.name}`);
-                            if (mapRef.current) mapRef.current.panTo({ lat: s.lat, lng: s.lng });
+                            if (!fitMapToParkingLot(s.id) && mapRef.current) mapRef.current.panTo({ lat: s.lat, lng: s.lng });
                           }}
                         >
                           View on map
@@ -900,6 +1467,9 @@ export default function App() {
                         >
                           Navigate
                         </button>
+                        <button type="button" className="secondary" onClick={() => reportData(s)}>
+                          Report data
+                        </button>
                       </div>
                     </div>
                   );
@@ -907,7 +1477,7 @@ export default function App() {
 
                 {spots.length === 0 ? (
                   <div className="help">
-                    No spots match.
+                    No accessible parking lots match.
                     {parkingLotsCount > 0 ? (
                       <>
                         {' '}
@@ -1001,6 +1571,9 @@ export default function App() {
                         >
                           Navigate
                         </button>
+                        <button type="button" className="secondary" onClick={() => reportData(l)}>
+                          Report data
+                        </button>
                       </div>
                     </div>
                   );
@@ -1014,6 +1587,52 @@ export default function App() {
 
           <div className="help">
             Data note: currently using a small built-in demo dataset. Replace with Open Data Kingston feed when available.
+          </div>
+
+          <div className="card" role="region" aria-label="AI chat">
+            <div className="label">AI Chat</div>
+            <div className="itemMeta">
+              Provider/model: {backboardLlmProvider}/{backboardModelName}
+            </div>
+
+            <div style={{ height: 10 }} />
+
+            <div className="list" role="list">
+              {aiChatMessages.map((m, idx) => (
+                <div key={idx} className="item" role="listitem">
+                  <div className="itemTitle">{m.role === 'user' ? 'You' : 'AI'}</div>
+                  <div className="itemMeta" style={{ whiteSpace: 'pre-wrap' }}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {aiChatMessages.length === 0 ? <div className="help">Ask about parking, accessibility, or route choices.</div> : null}
+            </div>
+
+            {aiChatError ? (
+              <div className="itemMeta" style={{ marginTop: 10 }}>
+                {aiChatError}
+              </div>
+            ) : null}
+
+            <div style={{ height: 10 }} />
+
+            <div className="row">
+              <input
+                value={aiChatInput}
+                disabled={isAiChatLoading}
+                onChange={(e) => setAiChatInput(e.target.value)}
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  void onSendAiChat();
+                }}
+                placeholder="Ask the AI…"
+              />
+              <button type="button" disabled={isAiChatLoading} onClick={onSendAiChat}>
+                {isAiChatLoading ? 'Sending…' : 'Send'}
+              </button>
+            </div>
           </div>
         </div>
       </aside>
@@ -1063,6 +1682,7 @@ export default function App() {
               ) : null}
 
               {Object.entries(accessibleLotCentroids).map(([id, pos]) => {
+                if (routeWaypoint?.kind === 'lot' && routeWaypoint.id === id) return null;
                 const lot = parkingLotById.get(id);
                 const handicapN = Number.parseInt(String(lot?.handicapSpace ?? '').trim(), 10);
                 const hasAccessible = Number.isFinite(handicapN) && handicapN > 0;
@@ -1103,6 +1723,25 @@ export default function App() {
                 />
               ) : null}
 
+              {routeWaypoint ? (
+                <MarkerF
+                  key={`route-waypoint-${routeWaypoint.kind}-${routeWaypoint.id}`}
+                  position={{ lat: routeWaypoint.lat, lng: routeWaypoint.lng }}
+                  title={routeWaypoint.label}
+                  label={{
+                    text: '♿',
+                    color: '#111827',
+                    fontSize: '16px',
+                    fontWeight: '700'
+                  }}
+                  zIndex={12}
+                  onClick={() => {
+                    setStatusMsg(`Waypoint: ${routeWaypoint.label}`);
+                    setSelectedParkingLotId(routeWaypoint.id);
+                  }}
+                />
+              ) : null}
+
               {userPos ? (
                 <MarkerF
                   key="user-location"
@@ -1119,18 +1758,6 @@ export default function App() {
                   }}
                 />
               ) : null}
-
-              {spots.map((s) => (
-                <MarkerF
-                  key={s.id}
-                  position={{ lat: s.lat, lng: s.lng }}
-                  onClick={() => {
-                    setSelectedId(s.id);
-                    setStatusMsg(`Selected: ${s.name}`);
-                  }}
-                  title={s.name}
-                />
-              ))}
 
               {Object.entries(parkingLotGeometries).flatMap(([id, geom]) => {
                 const lot = parkingLotById.get(id);
@@ -1190,22 +1817,6 @@ export default function App() {
                   />
                 );
               })}
-
-              {selectedSpot ? (
-                <InfoWindowF
-                  position={{ lat: selectedSpot.lat, lng: selectedSpot.lng }}
-                  onCloseClick={() => setSelectedId(null)}
-                >
-                  <div style={{ color: '#0b1220', maxWidth: 240 }}>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedSpot.name}</div>
-                    <div style={{ fontSize: 13, lineHeight: 1.3 }}>
-                      {selectedSpot.description ?? 'Accessible parking location.'}
-                      <br />
-                      Zone: {selectedSpot.zone ?? '—'}
-                    </div>
-                  </div>
-                </InfoWindowF>
-              ) : null}
 
               {selectedParkingLotId && !parkingLotGeometries[selectedParkingLotId] && parkingLotMarkers[selectedParkingLotId] && selectedParkingLot ? (
                 <InfoWindowF
