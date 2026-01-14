@@ -9,6 +9,12 @@ import { predictAvailability } from './predict';
 import type { ParkingLotArea, ParkingSpot } from './types';
 
 const DEFAULT_CENTER = { lat: 44.2312, lng: -76.4860 };
+const KINGSTON_VIEWBOX = {
+  left: -76.80,
+  top: 44.40,
+  right: -76.25,
+  bottom: 44.10
+};
 
 type SpotWithDistance = ParkingSpot & { distanceMeters: number };
 
@@ -78,6 +84,36 @@ export default function App() {
     return spots.find((s) => s.id === selectedId) ?? null;
   }, [selectedId, spots]);
 
+  const autoSelectNearestSpotTo = (destination: { lat: number; lng: number }) => {
+    let bestId: string | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    let bestPos: { lat: number; lng: number } | null = null;
+
+    for (const s of MOCK_SPOTS) {
+      const d = haversineMeters(destination, { lat: s.lat, lng: s.lng });
+      if (d < bestDist) {
+        bestDist = d;
+        bestId = s.id;
+        bestPos = { lat: s.lat, lng: s.lng };
+      }
+    }
+
+    if (!bestId || !bestPos) return;
+    setSelectedId(bestId);
+
+    const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+    if (mapRef.current && gmaps) {
+      const b = new gmaps.LatLngBounds();
+      b.extend(destination);
+      b.extend(bestPos);
+      mapRef.current.fitBounds(b, 72);
+    } else if (mapRef.current) {
+      mapRef.current.panTo(bestPos);
+    }
+
+    setStatusMsg(`Nearest accessible parking selected (${formatDistance(bestDist)}).`);
+  };
+
   useEffect(() => {
     if (!apiKey) {
       setStatusMsg(
@@ -108,7 +144,6 @@ export default function App() {
             | { type: 'MultiPolygon'; coordinates: number[][][][] };
         }>;
       };
-
       const next: Record<string, ParkingLotGeometry> = {};
 
       for (const f of parsed.features) {
@@ -176,6 +211,51 @@ export default function App() {
   };
 
   const canUseGeo = typeof navigator !== 'undefined' && 'geolocation' in navigator;
+
+  const geocodePlaceFree = async (q: string): Promise<{ lat: number; lng: number; label: string }> => {
+    const query = q.trim();
+    if (!query) throw new Error('Empty query');
+
+    const makeUrl = (qq: string) => {
+      const u = new URL('https://nominatim.openstreetmap.org/search');
+      u.searchParams.set('format', 'jsonv2');
+      u.searchParams.set('q', qq);
+      u.searchParams.set('limit', '1');
+      u.searchParams.set('addressdetails', '1');
+      u.searchParams.set('countrycodes', 'ca');
+      u.searchParams.set('viewbox', `${KINGSTON_VIEWBOX.left},${KINGSTON_VIEWBOX.top},${KINGSTON_VIEWBOX.right},${KINGSTON_VIEWBOX.bottom}`);
+      u.searchParams.set('bounded', '1');
+      return u;
+    };
+
+    const tries: string[] = [];
+    tries.push(query);
+    if (!/\bkingston\b/i.test(query)) tries.push(`${query} Kingston, Ontario`);
+
+    let lastErr: unknown = null;
+    for (const t of tries) {
+      try {
+        const res = await fetch(makeUrl(t).toString(), {
+          headers: {
+            'Accept': 'application/json'
+          }
+        });
+        if (!res.ok) throw new Error(`Search failed (${res.status})`);
+        const json = (await res.json()) as Array<{ lat: string; lon: string; display_name?: string }>;
+        const top = json?.[0];
+        if (!top) throw new Error('No results');
+
+        const lat = Number(top.lat);
+        const lng = Number(top.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Bad coordinates');
+        return { lat, lng, label: top.display_name ?? query };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw lastErr ?? new Error('No results');
+  };
 
   const geocodeAddress = async (address: string): Promise<{ lat: number; lng: number }> => {
     if (!isLoaded || !apiKey) throw new Error('Google Maps not loaded');
@@ -487,8 +567,9 @@ export default function App() {
                 const raw = query.trim();
                 e.preventDefault();
                 try {
-                  setStatusMsg('Searching for that place…');
-                  const pos = await geocodeAddress(raw);
+                  setStatusMsg('Searching Kingston…');
+                  const free = await geocodePlaceFree(raw);
+                  const pos = { lat: free.lat, lng: free.lng };
                   setRefPos(pos);
                   setFilterQuery('');
                   setActiveTab('results');
@@ -496,9 +577,24 @@ export default function App() {
                     mapRef.current.panTo(pos);
                     mapRef.current.setZoom(15);
                   }
-                  setStatusMsg('Place found. Showing nearby accessible parking.');
+                  setStatusMsg('Place found. Selecting nearest accessible parking…');
+                  autoSelectNearestSpotTo(pos);
                 } catch {
-                  setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
+                  try {
+                    setStatusMsg('Search failed. Trying alternate lookup…');
+                    const pos = await geocodeAddress(raw);
+                    setRefPos(pos);
+                    setFilterQuery('');
+                    setActiveTab('results');
+                    if (mapRef.current) {
+                      mapRef.current.panTo(pos);
+                      mapRef.current.setZoom(15);
+                    }
+                    setStatusMsg('Place found. Selecting nearest accessible parking…');
+                    autoSelectNearestSpotTo(pos);
+                  } catch {
+                    setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
+                  }
                 }
               }}
               placeholder="e.g., Downtown, KGH, Market Square"
