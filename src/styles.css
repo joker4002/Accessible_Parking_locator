@@ -43,9 +43,28 @@ a {
 
 .container {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: 340px 1fr 340px;
   height: 100vh;
   min-height: 0;
+  overflow: visible;
+  position: relative;
+}
+
+/* Allow overflow for toggle buttons */
+.container > aside {
+  overflow: visible !important;
+}
+
+.container.leftCollapsed {
+  grid-template-columns: 0 1fr 340px;
+}
+
+.container.rightCollapsed {
+  grid-template-columns: 340px 1fr 0;
+}
+
+.container.leftCollapsed.rightCollapsed {
+  grid-template-columns: 0 1fr 0;
 }
 
 @media (max-width: 920px) {
@@ -57,6 +76,44 @@ a {
   .sidebar {
     height: auto;
   }
+}
+
+.sidebarLeft,
+.sidebarRight {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebarLeft.collapsed,
+.sidebarRight.collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  overflow: visible !important;
+  padding: 0 !important;
+  border: none !important;
+}
+
+.sidebarLeft.collapsed > *:not(.panelToggle),
+.sidebarRight.collapsed > *:not(.panelToggle) {
+  display: none !important;
+}
+
+.sidebarLeft.collapsed .panelToggle,
+.sidebarRight.collapsed .panelToggle {
+  display: flex !important;
+}
+
+.sidebarLeft {
+  border-right: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent);
+}
+
+.sidebarRight {
+  border-left: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent);
 }
 
 .sidebar {
@@ -83,14 +140,13 @@ a {
   padding-bottom: 12px;
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.35);
   border-bottom: 1px solid var(--border);
-  max-height: 50vh;
-  overflow: auto;
 }
 
 .sidebarScroll {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -361,4 +417,435 @@ button:disabled {
 .toast strong {
   display: block;
   margin-bottom: 4px;
+}
+
+/* Panel toggle buttons */
+.panelToggle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 60px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  z-index: 1000;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.3);
+}
+
+.panelToggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.panelToggleLeft {
+  right: -24px;
+}
+
+.sidebarLeft.collapsed .panelToggleLeft {
+  right: -24px;
+}
+
+.panelToggleRight {
+  left: -24px;
+  border-radius: 8px 0 0 8px;
+}
+
+.sidebarRight.collapsed .panelToggleRight {
+  left: -24px;
+}
+
+/* Ensure buttons are visible even when panels are collapsed */
+.sidebarLeft,
+.sidebarRight {
+  overflow: visible !important;
+}
+
+.container.leftCollapsed .sidebarLeft .panelToggleLeft,
+.container.rightCollapsed .sidebarRight .panelToggleRight {
+  display: flex !important;
+  visibility: visible !important;
+}
+
+.panelToggle.collapsed {
+  border-radius: 0 8px 8px 0;
+}
+
+.panelToggleRight.collapsed {
+  border-radius: 8px 0 0 8px;
+}
+
+.panelToggleInner {
+  font-size: 16px;
+  color: var(--text);
+  user-select: none;
+}
+
+/* Skip link */
+.skipLink {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: var(--primary);
+  color: var(--text);
+  padding: 8px 16px;
+  text-decoration: none;
+  z-index: 1000;
+  border-radius: 4px;
+}
+
+.skipLink:focus {
+  top: 0;
+}
+
+/* Chat input wrapper */
+.chatInputWrapper {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.chatInput {
+  flex: 1;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.chatInput:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.chatSendButton {
+  width: 36px;
+  height: 36px;
+  background: var(--primary);
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease;
+}
+
+.chatSendButton:hover:not(:disabled) {
+  background: var(--primary-2);
+}
+
+.chatSendButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Language toggle */
+.languageToggle {
+  display: flex;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.languageButton {
+  padding: 4px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.languageButton:hover {
+  color: var(--text);
+}
+
+.languageButton.active {
+  background: var(--primary);
+  color: var(--text);
+}
+
+.helpButton {
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.helpButton:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Modal */
+.modalOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modalHeader h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modalHeader button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.modalHeader button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.modalBody {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.shortcutItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcutItem:last-child {
+  border-bottom: none;
+}
+
+.shortcutItem kbd {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: monospace;
+  font-size: 12px;
+  min-width: 60px;
+  text-align: center;
+}
+
+.shortcutItem span {
+  flex: 1;
+  font-size: 14px;
+}
+
+/* Loading indicators */
+.chatLoadingItem {
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.loadingMessage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.loadingSpinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.progressBar {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progressBarFill {
+  height: 100%;
+  background: var(--primary);
+  width: 30%;
+  animation: progress 1.5s ease-in-out infinite;
+}
+
+@keyframes progress {
+  0%, 100% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(400%);
+  }
+}
+
+.mapLoadingOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(11, 18, 32, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  z-index: 10;
+}
+
+/* Skeleton loaders */
+.skeletonItem {
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.skeletonText {
+  height: 12px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 50%, rgba(255, 255, 255, 0.1) 100%);
+  background-size: 200% 100%;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  animation: skeleton 1.5s ease-in-out infinite;
+}
+
+.skeletonTextLarge {
+  height: 16px;
+  width: 70%;
+}
+
+.skeletonTextSmall {
+  height: 10px;
+  width: 50%;
+}
+
+@keyframes skeleton {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.chatItem {
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.chatItemHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.chatRole {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.chatItemContent {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* Google Maps InfoWindow close button styling - hide completely */
+.gm-ui-hover-effect {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+/* Hide all close button elements */
+.gm-ui-hover-effect > span,
+.gm-ui-hover-effect > span > img,
+.gm-ui-hover-effect img,
+.gm-style-iw-c .gm-ui-hover-effect,
+.gm-style-iw-d .gm-ui-hover-effect,
+.gm-style-iw-c .gm-ui-hover-effect > span > img,
+.gm-style-iw-d .gm-ui-hover-effect > span > img,
+.gm-style-iw-c .gm-ui-hover-effect img,
+.gm-style-iw-d .gm-ui-hover-effect img,
+.gm-style-iw-c img[src*="close"],
+.gm-style-iw-d img[src*="close"],
+.gm-ui-hover-effect img[src*="close"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
 }

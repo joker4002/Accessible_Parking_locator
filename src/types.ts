@@ -28,3 +28,16 @@ export type ParkingLotArea = {
   shapeLength?: string;
   shapeArea?: string;
 };
+
+export type AccessibleFeature = {
+  objectId: string;
+  type: string;
+  status: string;
+  facilityName: string;
+  comment?: string;
+  globalId: string;
+  x: number; // Web Mercator X
+  y: number; // Web Mercator Y
+  lat: number; // Converted latitude
+  lng: number; // Converted longitude
+};

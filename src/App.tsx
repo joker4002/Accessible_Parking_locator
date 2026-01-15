@@ -4,9 +4,11 @@ import { BackboardHttpError, backboardGetOrCreateThread, backboardResetThread, b
 import { haversineMeters, formatDistance } from './geo';
 import parkingLotsCsv from './Parking_Lot_Areas.csv?raw';
 import parkingLotsGeoJson from './Parking_Lot_Areas.geojson?raw';
+import accessibleFeaturesCsv from './Accessible_Features_at_Kingston_Facilities_7247265357642076518.csv?raw';
 import { parseParkingLotAreas } from './parkingLots.ts';
-import { predictAvailability } from './predict';
-import type { ParkingLotArea, ParkingSpot } from './types';
+import { parseAccessibleFeatures } from './accessibleFeatures';
+import type { ParkingLotArea, ParkingSpot, AccessibleFeature } from './types';
+import { Language, t, setLanguage, getLanguage, translations } from './i18n';
 
 const DEFAULT_CENTER = { lat: 44.2312, lng: -76.4860 };
 const KINGSTON_VIEWBOX = {
@@ -66,27 +68,79 @@ export default function App() {
   const [parkingLotGeometries, setParkingLotGeometries] = useState<Record<string, ParkingLotGeometry>>({});
   const [activeTab, setActiveTab] = useState<'results' | 'lots'>('results');
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
+  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+  const directionsRendererKeyRef = useRef<number>(0);
   const [travelMode, setTravelMode] = useState<TravelModeKey>('DRIVING');
   const [lastRoute, setLastRoute] = useState<{ destination: { lat: number; lng: number }; label: string; viaAccessibleSpot?: boolean } | null>(null);
   const [routeWaypoint, setRouteWaypoint] = useState<
     | { lat: number; lng: number; label: string; kind: 'lot'; id: string }
     | null
   >(null);
-  const [aiAdvice, setAiAdvice] = useState<string | null>(null);
-  const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
-  const [aiError, setAiError] = useState<string | null>(null);
   const [aiChatMessages, setAiChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [aiChatInput, setAiChatInput] = useState<string>('');
   const [aiChatError, setAiChatError] = useState<string | null>(null);
   const [isAiChatLoading, setIsAiChatLoading] = useState<boolean>(false);
+  const [chatPlaceSuggestions, setChatPlaceSuggestions] = useState<Array<{ label: string; lat: number; lng: number }>>([]);
+  const [chatPendingQuery, setChatPendingQuery] = useState<string | null>(null);
   const [nearestOptions, setNearestOptions] = useState<
     Array<{ id: string; kind: 'lot'; label: string; lat: number; lng: number; distanceMeters: number; meta?: string }>
   >([]);
   const [isNearestLoading, setIsNearestLoading] = useState<boolean>(false);
   const [nearestError, setNearestError] = useState<string | null>(null);
-  const [busyPrediction, setBusyPrediction] = useState<{ busy: boolean; probability: number; rationale: string } | null>(null);
+  const [accessibleFeatures, setAccessibleFeatures] = useState<AccessibleFeature[]>([]);
+  const [nearbyAccessibleFeatures, setNearbyAccessibleFeatures] = useState<{
+    total: number;
+    byType: Array<{ type: string; count: number }>;
+  } | null>(null);
+  const [isLeftCollapsed, setIsLeftCollapsed] = useState(false);
+  const [isRightCollapsed, setIsRightCollapsed] = useState(false);
+  const [language, setLanguageState] = useState<Language>(() => getLanguage());
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const chatInputRef = useRef<HTMLInputElement>(null);
 
   const now = useMemo(() => new Date(), []);
+
+  // Update language when state changes
+  useEffect(() => {
+    setLanguage(language);
+    document.documentElement.lang = language === 'fr' ? 'fr-CA' : 'en-CA';
+  }, [language]);
+
+  const tr = (key: keyof typeof translations.en, params?: Record<string, string | number>) => {
+    const text = translations[language][key] ?? translations.en[key] ?? String(key);
+    if (!params) return text;
+    let result = text;
+    for (const [k, v] of Object.entries(params)) {
+      result = result.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
+    }
+    return result;
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'k') {
+          e.preventDefault();
+          chatInputRef.current?.focus();
+        } else if (e.key === 'l') {
+          e.preventDefault();
+          onLocateMe();
+        } else if (e.key === '[') {
+          e.preventDefault();
+          setIsLeftCollapsed((prev) => !prev);
+        } else if (e.key === ']') {
+          e.preventDefault();
+          setIsRightCollapsed((prev) => !prev);
+        }
+      } else if (e.key === '?') {
+        e.preventDefault();
+        setShowShortcuts(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const parkingLotById = useMemo(() => {
     const m = new Map<string, ParkingLotArea>();
@@ -128,7 +182,10 @@ export default function App() {
   }, [parkingLotGeometries, parkingLotById]);
 
   const spots: SpotWithDistance[] = useMemo(() => {
-    const origin = userPos ?? refPos ?? DEFAULT_CENTER;
+    // Only show results when a destination (refPos) is selected
+    if (!refPos) return [];
+    
+    const origin = refPos;
     const radM = radiusKm * 1000;
     const q = filterQuery.trim().toLowerCase();
 
@@ -167,7 +224,8 @@ export default function App() {
       })
       .filter((v): v is SpotWithDistance => v !== null)
       .filter((s) => s.distanceMeters <= radM)
-      .sort((a, b) => a.distanceMeters - b.distanceMeters);
+      .sort((a, b) => a.distanceMeters - b.distanceMeters)
+      .slice(0, 5); // Only show top 5 nearest parking lots
 
     if (!q) return computed;
 
@@ -175,7 +233,7 @@ export default function App() {
       const hay = `${s.name} ${s.zone ?? ''} ${s.description ?? ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [userPos, refPos, radiusKm, filterQuery, parkingLots, lotCentroidsWithAccessibleSpaces, parkingLotMarkers]);
+  }, [refPos, radiusKm, filterQuery, parkingLots, lotCentroidsWithAccessibleSpaces, parkingLotMarkers]);
 
   const findNearestAccessibleParkingTo = (
     destination: { lat: number; lng: number },
@@ -196,6 +254,39 @@ export default function App() {
     return bestLot;
   };
 
+  // Extract place name from messages like "im going to shoppers" or "I want to go to metro"
+  const extractPlaceName = (message: string): string | null => {
+    const lower = message.toLowerCase().trim();
+    
+    // Common patterns for destination queries
+    const patterns = [
+      /(?:going to|want to go to|heading to|visiting|need to go to|looking for)\s+(.+?)(?:\s|$|,|\.)/i,
+      /(?:go to|visit|find|search for|looking for)\s+(.+?)(?:\s|$|,|\.)/i,
+      /^(.+?)(?:\s+in\s+kingston|\s+kingston|$)/i, // Simple place name at start
+    ];
+
+    for (const pattern of patterns) {
+      const match = message.match(pattern);
+      if (match && match[1]) {
+        const place = match[1].trim();
+        // Remove common stop words and location words
+        const cleaned = place
+          .replace(/\b(the|a|an|in|at|on|near|by|around)\b/gi, '')
+          .trim();
+        if (cleaned.length >= 2) {
+          return cleaned;
+        }
+      }
+    }
+
+    // If no pattern matches, try the whole message (might be just a place name)
+    if (lower.length >= 2 && lower.length < 50) {
+      return message.trim();
+    }
+
+    return null;
+  };
+
   const onSendAiChat = async () => {
     const msg = aiChatInput.trim();
     if (!msg) return;
@@ -203,9 +294,49 @@ export default function App() {
     setIsAiChatLoading(true);
     setAiChatError(null);
     setAiChatInput('');
+    setChatPlaceSuggestions([]);
+    setChatPendingQuery(null);
     setAiChatMessages((prev) => [...prev, { role: 'user', content: msg }]);
 
     try {
+      // First, try to extract place name and search for places
+      const placeName = extractPlaceName(msg);
+      if (placeName) {
+        try {
+          const places = await searchPlacesFree(placeName);
+          if (places.length > 0) {
+            setChatPlaceSuggestions(places);
+            setChatPendingQuery(placeName);
+            setAiChatMessages((prev) => [...prev, { 
+              role: 'assistant', 
+              content: tr('foundMatches', { count: places.length, query: placeName }) 
+            }]);
+            setIsAiChatLoading(false);
+            return;
+          }
+        } catch {
+          // If place search fails, continue with AI chat
+        }
+      }
+
+      // Also try searching the original message directly
+      try {
+        const places = await searchPlacesFree(msg);
+        if (places.length > 0) {
+          setChatPlaceSuggestions(places);
+          setChatPendingQuery(msg);
+          setAiChatMessages((prev) => [...prev, { 
+            role: 'assistant', 
+            content: tr('foundMatches', { count: places.length, query: msg }) 
+          }]);
+          setIsAiChatLoading(false);
+          return;
+        }
+      } catch {
+        // If place search fails, continue with AI chat
+      }
+
+      // If no places found or search failed, use AI chat
       const { thread_id } = await backboardGetOrCreateThread();
       const res = await backboardSendMessage({
         thread_id,
@@ -233,7 +364,7 @@ export default function App() {
       } else {
         setAiChatError(
           ((e as Error).message || 'AI request failed') +
-            '. If this says “Failed to fetch”, start the local API server: `node server.mjs`.'
+            '. If this says "Failed to fetch", start the local API server: `node server.mjs`.'
         );
       }
     } finally {
@@ -291,7 +422,7 @@ export default function App() {
       if (!refPos) {
         setNearestOptions([]);
         setNearestError(null);
-        setBusyPrediction(null);
+        setNearbyAccessibleFeatures(null);
         return;
       }
 
@@ -317,53 +448,45 @@ export default function App() {
         }));
         setNearestOptions(options);
 
-        const predRes = await fetch(`/api/predict?lat=${encodeURIComponent(refPos.lat)}&lng=${encodeURIComponent(refPos.lng)}`);
-        if (!predRes.ok) throw new Error(`Predict API failed (${predRes.status})`);
-        const predJson = (await predRes.json()) as { busy?: boolean; probability?: number; rationale?: string };
-        if (typeof predJson.busy === 'boolean' && typeof predJson.probability === 'number') {
-          setBusyPrediction({ busy: predJson.busy, probability: predJson.probability, rationale: predJson.rationale ?? '' });
-        } else {
-          setBusyPrediction(null);
+        // Find nearby accessible features
+        const radiusMeters = 500; // 500m radius
+        const nearby = accessibleFeatures
+          .filter((f) => {
+            const dist = haversineMeters(refPos, { lat: f.lat, lng: f.lng });
+            return dist <= radiusMeters && f.status === 'Active';
+          })
+          .map((f) => ({
+            ...f,
+            distanceMeters: haversineMeters(refPos, { lat: f.lat, lng: f.lng })
+          }))
+          .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+        // Group by type
+        const byType = new Map<string, number>();
+        for (const f of nearby) {
+          byType.set(f.type, (byType.get(f.type) ?? 0) + 1);
         }
+
+        setNearbyAccessibleFeatures({
+          total: nearby.length,
+          byType: Array.from(byType.entries()).map(([type, count]) => ({ type, count }))
+        });
       } catch (e) {
         setNearestError(
           ((e as Error).message || 'API error') +
             '. If the API server is not running, start it: `node server.mjs` (port 8787).'
         );
         setNearestOptions(getNearestAccessibleOptionsTo(refPos, 5));
-        setBusyPrediction({
-          busy: isBusyNow(refPos),
-          probability: isBusyNow(refPos) ? 0.35 : 0.7,
-          rationale: isBusyNow(refPos)
-            ? 'Saturday morning downtown tends to be busiest.'
-            : 'Typical availability expected for this area.'
-        });
+        setNearbyAccessibleFeatures(null);
       } finally {
         setIsNearestLoading(false);
       }
     };
 
     void run();
-  }, [refPos]);
+  }, [refPos, accessibleFeatures]);
 
-  const isBusyNow = (dest: { lat: number; lng: number }) => {
-    const d = new Date();
-    const isSaturday = d.getDay() === 6;
-    const hour = d.getHours();
-    const isMorning = hour >= 9 && hour <= 12;
-    const isDowntown = dest.lat >= 44.225 && dest.lat <= 44.245 && dest.lng >= -76.52 && dest.lng <= -76.47;
-    return isSaturday && isMorning && isDowntown;
-  };
 
-  const reportData = async (payload: unknown) => {
-    try {
-      const text = JSON.stringify(payload, null, 2);
-      await navigator.clipboard.writeText(text);
-      setStatusMsg('Copied report details to clipboard.');
-    } catch {
-      setStatusMsg('Could not copy report details.');
-    }
-  };
 
   useEffect(() => {
     if (!apiKey) {
@@ -373,6 +496,65 @@ export default function App() {
     }
   }, [apiKey]);
 
+  // Auto-locate user position on app load
+  useEffect(() => {
+    onLocateMe();
+  }, []); // Only run once on mount
+
+  // Style Google Maps InfoWindow close button
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.id = 'gm-infowindow-close-style';
+    style.textContent = `
+      /* Hide all Google Maps InfoWindow close buttons immediately */
+      .gm-ui-hover-effect,
+      .gm-ui-hover-effect > span,
+      .gm-ui-hover-effect > span > img,
+      .gm-ui-hover-effect img,
+      .gm-style-iw-c .gm-ui-hover-effect,
+      .gm-style-iw-d .gm-ui-hover-effect,
+      .gm-style-iw-c .gm-ui-hover-effect > span > img,
+      .gm-style-iw-d .gm-ui-hover-effect > span > img,
+      .gm-style-iw-c .gm-ui-hover-effect img,
+      .gm-style-iw-d .gm-ui-hover-effect img,
+      .gm-style-iw-c img[src*="close"],
+      .gm-style-iw-d img[src*="close"],
+      .gm-ui-hover-effect img[src*="close"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    // Use MutationObserver to immediately hide any close buttons that appear
+    const observer = new MutationObserver(() => {
+      const closeButtons = document.querySelectorAll('.gm-ui-hover-effect');
+      closeButtons.forEach((btn) => {
+        if (btn instanceof HTMLElement) {
+          btn.style.setProperty('display', 'none', 'important');
+          btn.style.setProperty('visibility', 'hidden', 'important');
+          btn.style.setProperty('opacity', '0', 'important');
+          btn.style.setProperty('pointer-events', 'none', 'important');
+        }
+      });
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    return () => {
+      observer.disconnect();
+      const existingStyle = document.getElementById('gm-infowindow-close-style');
+      if (existingStyle) {
+        document.head.removeChild(existingStyle);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     try {
       const lots = parseParkingLotAreas(parkingLotsCsv);
@@ -380,6 +562,15 @@ export default function App() {
       setParkingLotsError(null);
     } catch {
       setParkingLotsError('Could not load Parking_Lot_Areas.csv');
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const features = parseAccessibleFeatures(accessibleFeaturesCsv);
+      setAccessibleFeatures(features);
+    } catch (e) {
+      console.error('Could not load accessible features CSV:', e);
     }
   }, []);
 
@@ -475,7 +666,17 @@ export default function App() {
 
     const tries: string[] = [];
     tries.push(query);
-    if (!/\bkingston\b/i.test(query)) tries.push(`${query} Kingston, Ontario`);
+    // Expand common queries to improve search results
+    const expandedQuery = query.toLowerCase();
+    if (expandedQuery.includes('shopper')) {
+      tries.push('Shoppers Drug Mart Kingston, Ontario');
+      tries.push(`${query} Kingston, Ontario`);
+    } else if (!/\bkingston\b/i.test(query)) {
+      tries.push(`${query} Kingston, Ontario`);
+    }
+
+    const allResults: Array<{ label: string; lat: number; lng: number }> = [];
+    const seen = new Set<string>(); // Track seen locations to avoid duplicates across all tries
 
     let lastErr: unknown = null;
     for (const t of tries) {
@@ -498,7 +699,7 @@ export default function App() {
         };
 
         const feats = json.features ?? [];
-        const out: Array<{ label: string; lat: number; lng: number }> = [];
+        
         for (const f of feats) {
           const coords = f.geometry?.coordinates;
           if (!coords || coords.length !== 2) continue;
@@ -506,15 +707,47 @@ export default function App() {
           if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
 
           const p = f.properties;
-          const labelParts = [p?.name, p?.street, p?.city, p?.state, p?.country].filter(Boolean);
+          const name = (p?.name || '').trim();
+          const street = (p?.street || '').trim();
+          const city = (p?.city || '').trim();
+          
+          // Build label
+          const labelParts = [name, street, city, p?.state, p?.country].filter(Boolean);
           const label = labelParts.length ? labelParts.join(', ') : query;
-          out.push({ label, lat, lng });
-          if (out.length >= 8) break;
+          
+          // Create multiple unique keys for better duplicate detection
+          // 1. High precision coordinate key (about 1m precision)
+          const coordKey = `${Math.round(lat * 100000)},${Math.round(lng * 100000)}`;
+          
+          // 2. Name + street key (for same store at same street)
+          const nameStreetKey = name && street ? `${name.toLowerCase()}:${street.toLowerCase()}` : '';
+          
+          // 3. Full address key (normalized)
+          const fullAddressKey = label.toLowerCase().replace(/\s+/g, ' ').trim();
+          
+          // Check all keys - if any match, it's a duplicate
+          if (seen.has(coordKey) || (nameStreetKey && seen.has(nameStreetKey)) || seen.has(fullAddressKey)) {
+            continue;
+          }
+          
+          // Add all keys to seen set
+          seen.add(coordKey);
+          if (nameStreetKey) seen.add(nameStreetKey);
+          seen.add(fullAddressKey);
+          
+          allResults.push({ label, lat, lng });
+          if (allResults.length >= 8) break;
         }
-        return out;
+        
+        if (allResults.length >= 8) break;
       } catch (e) {
         lastErr = e;
       }
+    }
+
+    // Return unique results, limited to 8
+    if (allResults.length > 0) {
+      return allResults.slice(0, 8);
     }
 
     throw lastErr ?? new Error('Search failed');
@@ -708,7 +941,7 @@ export default function App() {
     });
   }, [parkingLots, filterQuery, onlyAccessibleLots]);
 
-  const resultsCount = spots.length;
+  const resultsCount = nearestOptions.length;
   const parkingLotsCount = filteredParkingLots.length;
 
   useEffect(() => {
@@ -755,80 +988,6 @@ export default function App() {
     setStatusMsg('Route cleared.');
   };
 
-  const onAskAiAdvice = async () => {
-    if (!refPos) {
-      setAiError('Select a destination first.');
-      return;
-    }
-
-    setIsAiLoading(true);
-    setAiError(null);
-    try {
-      const { thread_id } = await backboardGetOrCreateThread();
-
-      const originText = userPos ? `User location: (${userPos.lat.toFixed(5)}, ${userPos.lng.toFixed(5)})` : 'User location: unknown';
-      const destinationText = `Destination: ${destinationLabel ?? 'Selected destination'} (${refPos.lat.toFixed(5)}, ${refPos.lng.toFixed(5)})`;
-      const waypointText = routeWaypoint
-        ? `Chosen accessible parking waypoint: ${routeWaypoint.label} (${routeWaypoint.lat.toFixed(5)}, ${routeWaypoint.lng.toFixed(5)})`
-        : 'Chosen accessible parking waypoint: not computed yet';
-      const modeText = `Travel mode: ${travelMode}`;
-
-      const prompt =
-        `You are helping a wheelchair user in Kingston, Ontario.\n` +
-        `${originText}\n` +
-        `${destinationText}\n` +
-        `${waypointText}\n` +
-        `${modeText}\n\n` +
-        `Task: Give short bullet-point advice for the best accessible parking stop (near the destination), and estimate the chance of finding an accessible spot now. ` +
-        `If the waypoint seems suboptimal, suggest a better alternative near the destination. Keep it concise.`;
-
-      const res = await backboardSendMessage({
-        thread_id,
-        content: prompt,
-        memory: 'Auto',
-        web_search: 'off',
-        llm_provider: backboardLlmProvider,
-        model_name: backboardModelName
-      });
-
-      const text = (res.content ?? '').trim();
-      if (!text) {
-        setAiError('AI response was empty.');
-        return;
-      }
-
-      const looksLikeQuotaError = /LLM Invocation Error|insufficient_quota|exceeded your current quota/i.test(text);
-      if (looksLikeQuotaError) {
-        setAiAdvice(null);
-        setAiError(
-          `AI quota/provider error. Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
-            'Backboard returned an LLM invocation error (quota/billing). Fix: in Backboard dashboard, enable the chosen provider (and billing/keys) or switch to a provider/model that is enabled for this API key; then restart the dev server and click “Reset AI”.'
-        );
-        return;
-      }
-
-      setAiAdvice(text);
-    } catch (e) {
-      if (e instanceof BackboardHttpError) {
-        if (e.status === 429) {
-          setAiError(
-            `AI quota exceeded (429). Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
-              'Backboard is still returning an OpenAI-style insufficient_quota error, which usually means the chosen provider is not configured/available for this Backboard API key, or it is falling back to OpenAI internally. ' +
-              'Fix: In Backboard dashboard, ensure the provider is enabled (and billing/keys are set). Then restart the dev server and click “Reset AI”.'
-          );
-          return;
-        }
-        setAiError(e.message);
-        return;
-      }
-      setAiError(
-        ((e as Error).message || 'AI request failed') +
-          '. If this says “Failed to fetch”, start the local API server: `node server.mjs`.'
-      );
-    } finally {
-      setIsAiLoading(false);
-    }
-  };
 
   const routeTo = (destination: { lat: number; lng: number }, label: string, originOverride?: { lat: number; lng: number }) => {
     if (!isLoaded || !apiKey) {
@@ -837,9 +996,20 @@ export default function App() {
     }
     const origin = originOverride ?? userPos;
     if (!origin) {
-      setStatusMsg('Click “Locate me” first to enable in-app navigation.');
+      setStatusMsg('Click "Locate me" first to enable in-app navigation.');
       return;
     }
+
+    // Clear previous route before creating a new one
+    if (directionsRendererRef.current) {
+      directionsRendererRef.current.setDirections(null);
+      directionsRendererRef.current.setMap(null);
+      directionsRendererRef.current = null;
+    }
+    // Increment key to force React to recreate the DirectionsRenderer component
+    directionsRendererKeyRef.current += 1;
+    setDirections(null);
+    setRouteWaypoint(null);
 
     const svc = new google.maps.DirectionsService();
     const request: google.maps.DirectionsRequest = {
@@ -854,6 +1024,9 @@ export default function App() {
         trafficModel: 'bestguess'
       };
     }
+    // Ensure directions are cleared before making new request
+    setDirections(null);
+    
     svc.route(
       request,
       (result, status) => {
@@ -879,9 +1052,20 @@ export default function App() {
     }
     const origin = originOverride ?? userPos;
     if (!origin) {
-      setStatusMsg('Click “Locate me” first to enable in-app navigation.');
+      setStatusMsg('Click "Locate me" first to enable in-app navigation.');
       return;
     }
+
+    // Clear previous route before creating a new one
+    if (directionsRendererRef.current) {
+      directionsRendererRef.current.setDirections(null);
+      directionsRendererRef.current.setMap(null);
+      directionsRendererRef.current = null;
+    }
+    // Increment key to force React to recreate the DirectionsRenderer component
+    directionsRendererKeyRef.current += 1;
+    setDirections(null);
+    setRouteWaypoint(null);
 
     const computedNearest = findNearestAccessibleParkingTo(destination, { preferLots: true });
     const chosen = routeWaypoint ?? computedNearest;
@@ -909,6 +1093,9 @@ export default function App() {
         trafficModel: 'bestguess'
       };
     }
+    // Ensure directions are cleared before making new request
+    setDirections(null);
+    
     svc.route(
       request,
       (result, status) => {
@@ -1021,91 +1208,172 @@ export default function App() {
   }, [directions, travelMode]);
 
   return (
-    <div className="container">
-      <aside className="sidebar" aria-label="Search and results">
-        <div className="sidebarTop">
+    <div className={`container ${isLeftCollapsed ? 'leftCollapsed' : ''} ${isRightCollapsed ? 'rightCollapsed' : ''}`}>
+      {showShortcuts && (
+        <div className="modalOverlay" onClick={() => setShowShortcuts(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modalHeader">
+              <h2>{tr('keyboardShortcuts')}</h2>
+              <button type="button" onClick={() => setShowShortcuts(false)} aria-label={tr('close')}>×</button>
+            </div>
+            <div className="modalBody">
+              <div className="shortcutItem">
+                <kbd>Ctrl+K</kbd> / <kbd>⌘K</kbd>
+                <span>{tr('shortcutFocusChat')}</span>
+              </div>
+              <div className="shortcutItem">
+                <kbd>Ctrl+L</kbd> / <kbd>⌘L</kbd>
+                <span>{tr('shortcutRelocate')}</span>
+              </div>
+              <div className="shortcutItem">
+                <kbd>Ctrl+[</kbd> / <kbd>⌘[</kbd>
+                <span>{tr('shortcutToggleLeftPanel')}</span>
+              </div>
+              <div className="shortcutItem">
+                <kbd>Ctrl+]</kbd> / <kbd>⌘]</kbd>
+                <span>{tr('shortcutToggleRightPanel')}</span>
+              </div>
+              <div className="shortcutItem">
+                <kbd>?</kbd>
+                <span>{tr('showKeyboardShortcuts')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      <a className="skipLink" href="#main-content">
+        {tr('skipToMap')}
+      </a>
+      <aside className={`sidebar sidebarLeft ${isLeftCollapsed ? 'collapsed' : ''}`} aria-label={tr('chat')}>
+        <button
+          className={`panelToggle panelToggleLeft ${isLeftCollapsed ? 'collapsed' : ''}`}
+          onClick={() => setIsLeftCollapsed(!isLeftCollapsed)}
+          aria-label={isLeftCollapsed ? tr('showLeftPanel') : tr('hideLeftPanel')}
+        >
+          <div className="panelToggleInner">{isLeftCollapsed ? '→' : '←'}</div>
+        </button>
+        <div className="sidebarTop" style={{ flex: '0 0 auto' }}>
           <div className="header">
             <div className="brand">
-              <h1>KingstonAccess</h1>
-              <p>Accessible parking finder + availability hint</p>
+              <h1>{tr('appName')}</h1>
+              <p>{tr('appSubtitle')}</p>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="helpButton"
+                onClick={() => setShowShortcuts(true)}
+                aria-label={tr('showKeyboardShortcuts')}
+                title={tr('pressForShortcuts')}
+              >
+                ?
+              </button>
+              <div className="languageToggle">
+                <button
+                  type="button"
+                  className={`languageButton ${language === 'en' ? 'active' : ''}`}
+                  onClick={() => setLanguageState('en')}
+                  aria-label="English"
+                >
+                  EN
+                </button>
+                <button
+                  type="button"
+                  className={`languageButton ${language === 'fr' ? 'active' : ''}`}
+                  onClick={() => setLanguageState('fr')}
+                  aria-label="Français"
+                >
+                  FR
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="sidebarScroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+          <div className="card" role="region" aria-label={tr('chat')} style={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div className="label">{tr('chat')}</div>
+
+            <div className="list" role="list" style={{ flex: '1 1 auto', overflow: 'auto', minHeight: 0 }}>
+              {aiChatMessages.map((m, idx) => (
+                <div key={idx} className="chatItem" role="listitem">
+                  <div className="chatItemHeader">
+                    <span className="chatRole">{m.role === 'user' ? tr('you') : tr('assistant')}</span>
+                  </div>
+                  <div className="chatItemContent" style={{ whiteSpace: 'pre-wrap' }}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {isAiChatLoading && (
+                <div className="chatLoadingItem" role="status" aria-live="polite">
+                  <div className="loadingMessage">
+                    <span className="loadingSpinner" aria-hidden="true"></span>
+                    <span>{tr('sendingMessage')}</span>
+                  </div>
+                  <div className="progressBar" role="progressbar" aria-valuenow={0} aria-valuemin={0} aria-valuemax={100}>
+                    <div className="progressBarFill"></div>
+                  </div>
+                </div>
+              )}
+              {aiChatMessages.length === 0 && !isAiChatLoading ? (
+                <div className="help">
+                  {tr('typeDestination', { example: 'Metro' })}
+                </div>
+              ) : null}
+
+              {chatPlaceSuggestions.length > 0 ? (
+                <div className="item" role="listitem">
+                  <div className="itemTitle">{tr('matches')}{chatPendingQuery ? tr('matchesFor', { query: chatPendingQuery }) : ''}</div>
+                  <div style={{ height: 8 }} />
+                  <div className="suggestions" role="list" aria-label={tr('destinationMatches')}>
+                    {chatPlaceSuggestions.map((sug, idx) => (
+                      <button
+                        key={`${sug.lat},${sug.lng},${idx}`}
+                        type="button"
+                        className="suggestionButton"
+                        role="listitem"
+                        onClick={() => {
+                          selectPlace({ lat: sug.lat, lng: sug.lng }, sug.label);
+                          setChatPlaceSuggestions([]);
+                          setChatPendingQuery(null);
+                          setAiChatMessages((prev) => [...prev, { role: 'assistant', content: tr('selectedSeeResults', { label: sug.label }) }]);
+                        }}
+                      >
+                        {sug.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
-          </div>
-
-          <div className="card" role="region" aria-label="Search controls">
-            <div className="label" id="search-label">Search</div>
-            <input
-              aria-labelledby="search-label"
-              aria-busy={isSearchingPlaces}
-              value={query}
-              disabled={isSearchingPlaces}
-              onChange={(e) => {
-                const next = e.target.value;
-                setQuery(next);
-                setPlaceSelected(false);
-                setRefPos(null);
-                setDestinationLabel(null);
-                setFilterQuery('');
-              }}
-              onKeyDown={async (e: React.KeyboardEvent<HTMLInputElement>) => {
-                if (e.key !== 'Enter') return;
-                const raw = query.trim();
-                e.preventDefault();
-
-                if (!raw) return;
-
-                if (placeSuggestions.length > 0) {
-                  const top = placeSuggestions[0];
-                  selectPlace({ lat: top.lat, lng: top.lng }, top.label);
-                  return;
-                }
-
-                try {
-                  setIsSearchingPlaces(true);
-                  setStatusMsg('Searching Kingston…');
-                  const results = await searchPlacesFree(raw);
-                  if (results.length === 0) throw new Error('No results');
-
-                  if (results.length === 1) {
-                    const top = results[0];
-                    selectPlace({ lat: top.lat, lng: top.lng }, top.label);
-                  } else {
-                    setPlaceSuggestions(results);
-                    setStatusMsg('Multiple matches found. Select a place below.');
-                  }
-                } catch {
-                  try {
-                    setStatusMsg('Search failed. Trying alternate lookup…');
-                    const pos = await geocodeAddress(raw);
-                    selectPlace(pos, raw);
-                  } catch {
-                    setStatusMsg('Could not find that location. Showing filtered results instead (try adding “Kingston, ON”).');
-                  }
-                } finally {
-                  setIsSearchingPlaces(false);
-                }
-              }}
-              placeholder="e.g., Downtown, KGH, Market Square"
-              inputMode="search"
-            />
-
-            {placeSuggestions.length > 0 ? (
-              <div className="suggestions" role="list" aria-label="Place suggestions">
-                {placeSuggestions.map((sug, idx) => (
-                  <button
-                    key={`${sug.lat},${sug.lng},${idx}`}
-                    type="button"
-                    className="suggestionButton"
-                    role="listitem"
-                    onClick={() => {
-                      selectPlace({ lat: sug.lat, lng: sug.lng }, sug.label);
-                    }}
-                  >
-                    {sug.label}
-                  </button>
-                ))}
+            {aiChatError ? (
+              <div className="itemMeta" style={{ marginTop: 10 }}>
+                {aiChatError}
               </div>
             ) : null}
+
+            <div className="chatInputWrapper">
+              <input
+                ref={chatInputRef}
+                value={aiChatInput}
+                disabled={isAiChatLoading}
+                onChange={(e) => setAiChatInput(e.target.value)}
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  void onSendAiChat();
+                }}
+                placeholder={tr('typeDestinationPlaceholder')}
+                inputMode="search"
+                className="chatInput"
+                aria-label={tr('chatInputLabel')}
+              />
+              <button type="button" disabled={isAiChatLoading} onClick={onSendAiChat} className="chatSendButton" aria-label={tr('sendMessage')}>
+                ↑
+              </button>
+            </div>
 
             <div style={{ height: 10 }} />
 
@@ -1115,51 +1383,18 @@ export default function App() {
                 checked={onlyAccessibleLots}
                 onChange={(e) => setOnlyAccessibleLots(e.target.checked)}
               />
-              Only show lots with accessible spaces
+              {tr('onlyAccessibleSpaces')}
             </label>
-
-            <div style={{ height: 10 }} />
-
-            <div className="label" id="mode-label">Travel mode</div>
-            <select
-              aria-labelledby="mode-label"
-              value={travelMode}
-              onChange={(e) => setTravelMode(e.target.value as TravelModeKey)}
-            >
-              <option value={'DRIVING'}>Driving</option>
-              <option value={'TRANSIT'}>Transit</option>
-              <option value={'WALKING'}>Walking</option>
-            </select>
-
-            <div style={{ height: 10 }} />
-
-            <div className="label" id="radius-label">Distance filter</div>
-            <select
-              aria-labelledby="radius-label"
-              value={radiusKm}
-              onChange={(e) => setRadiusKm(Number(e.target.value))}
-            >
-              <option value={0.5}>0.5 km</option>
-              <option value={1}>1 km</option>
-              <option value={2}>2 km</option>
-              <option value={5}>5 km</option>
-            </select>
 
             <div style={{ height: 10 }} />
 
             <div className="row">
               <button type="button" onClick={onLocateMe} aria-describedby={ariaStatusId}>
-                Locate me
-              </button>
-              <button type="button" className="secondary" onClick={onCenterKingston} aria-describedby={ariaStatusId}>
-                Center on Kingston
-              </button>
-              <button type="button" className="secondary" onClick={onUseMapCenterAsLocation} aria-describedby={ariaStatusId}>
-                Use map center
+                {tr('relocate')}
               </button>
               {directions ? (
                 <button type="button" className="secondary" onClick={clearRoute} aria-describedby={ariaStatusId}>
-                  Clear route
+                  {tr('clearRoute')}
                 </button>
               ) : null}
               <button
@@ -1167,477 +1402,25 @@ export default function App() {
                 className="secondary"
                 onClick={() => {
                   backboardResetThread();
-                  setAiAdvice(null);
-                  setAiError(null);
                   setAiChatMessages([]);
                   setAiChatError(null);
-                  setStatusMsg('AI thread reset.');
+                  setStatusMsg(tr('chatReset'));
                 }}
               >
-                Reset AI
+                {tr('resetChat')}
               </button>
             </div>
 
             <div style={{ height: 10 }} />
 
             <div className="help" id={ariaStatusId} aria-live="polite">
-              {statusMsg ?? 'Tip: Use keyboard Tab/Shift+Tab to navigate controls and results.'}
-            </div>
-          </div>
-        </div>
-
-        <div className="sidebarScroll" aria-label="Lists">
-          {routeSummary ? (
-            <div className="card" role="region" aria-label="Navigation directions">
-              <div className="label">Navigation</div>
-              <div className="itemMeta">
-                Distance: {routeSummary.distance || '—'}
-                <br />
-                {travelMode === 'DRIVING' ? (
-                  <>
-                    With traffic: {routeSummary.durationTraffic || routeSummary.duration || '—'}
-                    <br />
-                    Base: {routeSummary.durationBase || '—'}
-                    <br />
-                    Delay: {routeSummary.durationDelay || '—'}
-                  </>
-                ) : (
-                  <>Time: {routeSummary.duration || '—'}</>
-                )}
-              </div>
-
-              <div style={{ height: 10 }} />
-
-              <div className="list" role="list">
-                {routeSummary.legs.flatMap((leg, legIdx) => {
-                  const header = (
-                    <div key={`leg-h-${legIdx}`} className="item" role="listitem">
-                      <div className="itemTitle">Leg {legIdx + 1}</div>
-                      <div className="itemMeta">
-                        From: {leg.start || '—'}
-                        <br />
-                        To: {leg.end || '—'}
-                        <br />
-                        {leg.distance ? `Distance: ${leg.distance}` : 'Distance: —'}
-                        {leg.duration ? ` • Time: ${leg.duration}` : null}
-                      </div>
-                    </div>
-                  );
-
-                  const steps = leg.steps.map((st, stepIdx) => {
-                    const t = st.transitSummary;
-                    return (
-                      <div key={`leg-${legIdx}-step-${stepIdx}`} className="item" role="listitem">
-                        <div className="itemTitle">Step {stepIdx + 1}</div>
-                        <div className="itemMeta">
-                          {t ? (
-                            <>
-                              {t.vehicle ?? 'Transit'} {t.line ? `(${t.line})` : ''}
-                              {t.headsign ? ` toward ${t.headsign}` : ''}
-                              <br />
-                              From: {t.from ?? '—'}
-                              <br />
-                              To: {t.to ?? '—'}
-                              <br />
-                              Stops: {typeof t.stops === 'number' ? t.stops : '—'}
-                              <br />
-                            </>
-                          ) : null}
-                          {st.instruction || '—'}
-                          <br />
-                          {st.distance ? `Distance: ${st.distance}` : null}
-                          {st.duration ? ` • Time: ${st.duration}` : null}
-                        </div>
-                      </div>
-                    );
-                  });
-
-                  return [header, ...steps];
-                })}
-              </div>
-            </div>
-          ) : null}
-
-          <div className="tabs" role="tablist" aria-label="List tabs">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'results'}
-              className={`tabButton ${activeTab === 'results' ? 'active' : ''}`}
-              onClick={() => setActiveTab('results')}
-            >
-              Results ({resultsCount})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'lots'}
-              className={`tabButton ${activeTab === 'lots' ? 'active' : ''}`}
-              onClick={() => setActiveTab('lots')}
-            >
-              Parking lots ({parkingLotsCount})
-            </button>
-          </div>
-
-          {activeTab === 'results' ? (
-            <div className="card" role="region" aria-label="Results list">
-              <div className="label">Results ({spots.length})</div>
-              <div className="list" role="list">
-                {refPos ? (
-                  <div className="item" role="listitem">
-                    <div className="itemHeader">
-                      <div>
-                        <div className="itemTitle">{destinationLabel ?? 'Selected destination'}</div>
-                        <div className="itemMeta">
-                          Destination
-                          <br />
-                          Lat: {refPos.lat.toFixed(5)}
-                          <br />
-                          Lng: {refPos.lng.toFixed(5)}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div style={{ height: 10 }} />
-
-                    <div className="row">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setStatusMsg(`Selected: ${destinationLabel ?? 'Destination'}`);
-                          if (mapRef.current) {
-                            mapRef.current.panTo(refPos);
-                            mapRef.current.setZoom(15);
-                          }
-                        }}
-                      >
-                        View on map
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => routeToViaAccessibleSpot(refPos, destinationLabel ?? 'Destination')}
-                      >
-                        Navigate (via accessible parking)
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={isAiLoading}
-                        onClick={onAskAiAdvice}
-                      >
-                        {isAiLoading ? 'AI…' : 'AI advice'}
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => {
-                          reportData({
-                            type: 'destination',
-                            label: destinationLabel ?? 'Selected destination',
-                            lat: refPos.lat,
-                            lng: refPos.lng
-                          });
-                        }}
-                      >
-                        Report data
-                      </button>
-                    </div>
-
-                    {aiError ? (
-                      <div className="itemMeta" style={{ marginTop: 10 }}>
-                        {aiError}
-                      </div>
-                    ) : null}
-
-                    {aiAdvice ? (
-                      <div className="itemMeta" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>
-                        {aiAdvice}
-                      </div>
-                    ) : null}
-
-                    <div style={{ height: 10 }} />
-
-                    <div className="itemMeta">
-                      Nearest accessible options (Top 5)
-                      {busyPrediction?.busy ? ' • Busy now (heuristic)' : ''}
-                    </div>
-                    {nearestError ? (
-                      <div className="itemMeta" style={{ marginTop: 8 }}>
-                        {nearestError}
-                      </div>
-                    ) : null}
-                    {busyPrediction ? (
-                      <div className="itemMeta" style={{ marginTop: 8 }}>
-                        Availability hint: {Math.round(busyPrediction.probability * 100)}% • {busyPrediction.rationale}
-                      </div>
-                    ) : null}
-                    <div className="list" role="list">
-                      {isNearestLoading ? (
-                        <div className="help">Loading nearest options…</div>
-                      ) : nearestOptions.length === 0 ? (
-                        <div className="help">No accessible parking lots found.</div>
-                      ) : (
-                        nearestOptions.map((opt) => (
-                          <div key={`${opt.kind}-${opt.id}`} className="item" role="listitem">
-                            <div className="itemTitle">{opt.label}</div>
-                            <div className="itemMeta">
-                              Type: Parking lot
-                              <br />
-                              Distance: {formatDistance(opt.distanceMeters)}
-                              {opt.meta ? (
-                                <>
-                                  <br />
-                                  {opt.meta}
-                                </>
-                              ) : null}
-                            </div>
-                            <div style={{ height: 10 }} />
-                            <div className="row">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setRouteWaypoint({ lat: opt.lat, lng: opt.lng, label: opt.label, kind: 'lot', id: opt.id });
-                                  if (mapRef.current) mapRef.current.panTo({ lat: opt.lat, lng: opt.lng });
-                                  setStatusMsg('Waypoint updated. Click Navigate again to reroute.');
-                                }}
-                              >
-                                Use as waypoint
-                              </button>
-                              <button type="button" className="secondary" onClick={() => reportData(opt)}>
-                                Report data
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                ) : null}
-
-                {spots.map((s) => {
-                  const pred = predictAvailability(s, now);
-                  const chipClass = pred.label === 'High' ? 'good' : pred.label === 'Medium' ? 'mid' : 'bad';
-
-                  return (
-                    <div
-                      key={s.id}
-                      className="item"
-                      role="listitem"
-                    >
-                      <div className="itemHeader">
-                        <div>
-                          <div className="itemTitle">{s.name}</div>
-                          <div className="itemMeta">
-                            Accessible spaces: {s.handicapSpace ?? '—'}
-                            <br />
-                            Distance: {formatDistance(s.distanceMeters)}
-                          </div>
-                        </div>
-                        <div className={`chip ${chipClass}`} aria-label={`Availability ${pred.label}`}>
-                          {pred.label} ({Math.round(pred.probability * 100)}%)
-                        </div>
-                      </div>
-
-                      <div className="itemMeta">
-                        {pred.rationale}
-                        <br />
-                        Owner: {s.ownership ?? '—'}
-                        <br />
-                        Capacity: {s.capacity ?? '—'}
-                      </div>
-
-                      <div style={{ height: 10 }} />
-
-                      <div className="row">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedParkingLotId(s.id);
-                            setStatusMsg(`Selected: ${s.name}`);
-                            if (!fitMapToParkingLot(s.id) && mapRef.current) mapRef.current.panTo({ lat: s.lat, lng: s.lng });
-                          }}
-                        >
-                          View on map
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => routeTo({ lat: s.lat, lng: s.lng }, s.name)}
-                        >
-                          Navigate
-                        </button>
-                        <button type="button" className="secondary" onClick={() => reportData(s)}>
-                          Report data
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {spots.length === 0 ? (
-                  <div className="help">
-                    No accessible parking lots match.
-                    {parkingLotsCount > 0 ? (
-                      <>
-                        {' '}
-                        Found {parkingLotsCount} matching parking lot{parkingLotsCount === 1 ? '' : 's'}.{' '}
-                        <button type="button" className="linkButton" onClick={() => setActiveTab('lots')}>
-                          View parking lots
-                        </button>
-                      </>
-                    ) : (
-                      <> Try increasing distance or clearing search.</>
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : (
-            <div className="card" role="region" aria-label="Parking lot areas dataset">
-              <div className="label">Parking lots ({filteredParkingLots.length})</div>
-              {parkingLotsError ? <div className="help">{parkingLotsError}</div> : null}
-              <div className="list" role="list">
-                {filteredParkingLots.map((l) => {
-                  const handicap = l.handicapSpace ?? '—';
-                  const capacity = l.capacity ?? '—';
-
-                  return (
-                    <div key={l.id} className="item" role="listitem">
-                      <div className="itemHeader">
-                        <div>
-                          <div className="itemTitle">{l.lotName ?? 'Unnamed lot'}</div>
-                          <div className="itemMeta">
-                            Owner: {l.ownership ?? '—'}
-                            <br />
-                            Capacity: {capacity}
-                            <br />
-                            Accessible spaces: {handicap}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style={{ height: 10 }} />
-
-                      <div className="row">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              setSelectedParkingLotId(l.id);
-
-                              const fitOk = fitMapToParkingLot(l.id);
-                              if (fitOk) {
-                                setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
-                                return;
-                              }
-
-                              // Fallback when no geometry exists for this lot.
-                              setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
-                              const pos = await geocodeParkingLot(l);
-                              if (mapRef.current) mapRef.current.panTo(pos);
-                              setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
-                            } catch {
-                              setStatusMsg('Could not locate this parking lot on the map.');
-                            }
-                          }}
-                        >
-                          View on map
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => {
-                            const ok = fitMapToParkingLot(l.id);
-                            if (!ok) {
-                              setStatusMsg('This lot has no boundary geometry available.');
-                              return;
-                            }
-
-                            const geom = parkingLotGeometries[l.id];
-                            const b = new google.maps.LatLngBounds();
-                            for (const poly of geom.polygons) {
-                              for (const ring of poly) {
-                                for (const pt of ring) b.extend(pt);
-                              }
-                            }
-                            const c = (() => {
-                              if (b.isEmpty()) return DEFAULT_CENTER;
-                              const center = b.getCenter();
-                              return { lat: center.lat(), lng: center.lng() };
-                            })();
-                            routeTo(c, l.lotName ?? 'Parking lot');
-                          }}
-                        >
-                          Navigate
-                        </button>
-                        <button type="button" className="secondary" onClick={() => reportData(l)}>
-                          Report data
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-                {filteredParkingLots.length === 0 ? (
-                  <div className="help">No parking lots match your search.</div>
-                ) : null}
-              </div>
-            </div>
-          )}
-
-          <div className="help">
-            Data note: currently using a small built-in demo dataset. Replace with Open Data Kingston feed when available.
-          </div>
-
-          <div className="card" role="region" aria-label="AI chat">
-            <div className="label">AI Chat</div>
-            <div className="itemMeta">
-              Provider/model: {backboardLlmProvider}/{backboardModelName}
-            </div>
-
-            <div style={{ height: 10 }} />
-
-            <div className="list" role="list">
-              {aiChatMessages.map((m, idx) => (
-                <div key={idx} className="item" role="listitem">
-                  <div className="itemTitle">{m.role === 'user' ? 'You' : 'AI'}</div>
-                  <div className="itemMeta" style={{ whiteSpace: 'pre-wrap' }}>
-                    {m.content}
-                  </div>
-                </div>
-              ))}
-              {aiChatMessages.length === 0 ? <div className="help">Ask about parking, accessibility, or route choices.</div> : null}
-            </div>
-
-            {aiChatError ? (
-              <div className="itemMeta" style={{ marginTop: 10 }}>
-                {aiChatError}
-              </div>
-            ) : null}
-
-            <div style={{ height: 10 }} />
-
-            <div className="row">
-              <input
-                value={aiChatInput}
-                disabled={isAiChatLoading}
-                onChange={(e) => setAiChatInput(e.target.value)}
-                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-                  if (e.key !== 'Enter') return;
-                  e.preventDefault();
-                  void onSendAiChat();
-                }}
-                placeholder="Ask the AI…"
-              />
-              <button type="button" disabled={isAiChatLoading} onClick={onSendAiChat}>
-                {isAiChatLoading ? 'Sending…' : 'Send'}
-              </button>
+              {statusMsg ?? tr('tipKeyboardNavigation')}
             </div>
           </div>
         </div>
       </aside>
 
-      <main className="mapWrap" aria-label="Map">
+      <main id="main-content" className="mapWrap" aria-label={tr('map')} tabIndex={-1}>
         {!apiKey ? (
           <div className="toast" role="alert">
             <strong>Google Maps API Key not configured</strong>
@@ -1654,7 +1437,18 @@ export default function App() {
           </div>
         ) : null}
 
-        <div className="map" role="application" aria-label="Interactive map">
+        <div className="map" role="application" aria-label={tr('interactiveMap')}>
+          {!isLoaded && !loadError && (
+            <div className="mapLoadingOverlay" role="status" aria-live="polite">
+              <div className="loadingMessage">
+                <span className="loadingSpinner" aria-hidden="true"></span>
+                <span>{tr('loadingMap')}</span>
+              </div>
+              <div className="progressBar" role="progressbar" aria-valuenow={0} aria-valuemin={0} aria-valuemax={100}>
+                <div className="progressBarFill"></div>
+              </div>
+            </div>
+          )}
           {isLoaded && apiKey ? (
             <GoogleMap
               mapContainerStyle={{ width: '100%', height: '100%' }}
@@ -1673,10 +1467,34 @@ export default function App() {
             >
               {directions ? (
                 <DirectionsRenderer
+                  key={`directions-${directionsRendererKeyRef.current}-${directions.routes?.[0]?.overview_polyline || Date.now()}`}
                   directions={directions}
+                  onLoad={(renderer) => {
+                    // Clear any previous renderer
+                    if (directionsRendererRef.current && directionsRendererRef.current !== renderer) {
+                      directionsRendererRef.current.setDirections(null);
+                      directionsRendererRef.current.setMap(null);
+                    }
+                    directionsRendererRef.current = renderer;
+                    // Ensure directions are set
+                    renderer.setDirections(directions);
+                  }}
+                  onUnmount={(renderer) => {
+                    // Explicitly clear directions when unmounting
+                    renderer.setDirections(null);
+                    renderer.setMap(null);
+                    if (directionsRendererRef.current === renderer) {
+                      directionsRendererRef.current = null;
+                    }
+                  }}
                   options={{
                     preserveViewport: false,
-                    suppressMarkers: false
+                    suppressMarkers: false,
+                    polylineOptions: {
+                      strokeColor: '#4285F4',
+                      strokeWeight: 5,
+                      strokeOpacity: 0.8
+                    }
                   }}
                 />
               ) : null}
@@ -1822,8 +1640,42 @@ export default function App() {
                 <InfoWindowF
                   position={parkingLotMarkers[selectedParkingLotId]}
                   onCloseClick={() => setSelectedParkingLotId(null)}
+                  options={{
+                    disableAutoPan: false
+                  }}
+                    onLoad={(infoWindow) => {
+                      // Immediately hide the close button using requestAnimationFrame for instant execution
+                      requestAnimationFrame(() => {
+                        const closeButtons = document.querySelectorAll('.gm-ui-hover-effect');
+                        closeButtons.forEach((btn) => {
+                          if (btn instanceof HTMLElement) {
+                            btn.style.setProperty('display', 'none', 'important');
+                            btn.style.setProperty('visibility', 'hidden', 'important');
+                            btn.style.setProperty('opacity', '0', 'important');
+                            btn.style.setProperty('pointer-events', 'none', 'important');
+                          }
+                        });
+                      });
+                    }}
                 >
-                  <div style={{ color: '#0b1220', maxWidth: 260 }}>
+                  <div 
+                    style={{ 
+                      color: '#0b1220', 
+                      maxWidth: 260,
+                      cursor: 'pointer',
+                      padding: '4px'
+                    }}
+                    onClick={() => setSelectedParkingLotId(null)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedParkingLotId(null);
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    aria-label="Close parking lot information"
+                  >
                     <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedParkingLot.lotName ?? 'Parking lot'}</div>
                     <div style={{ fontSize: 13, lineHeight: 1.3 }}>
                       Owner: {selectedParkingLot.ownership ?? '—'}
@@ -1831,6 +1683,9 @@ export default function App() {
                       Capacity: {selectedParkingLot.capacity ?? '—'}
                       <br />
                       Accessible spaces: {selectedParkingLot.handicapSpace ?? '—'}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#666', marginTop: 8, fontStyle: 'italic' }}>
+                      Click anywhere to close
                     </div>
                   </div>
                 </InfoWindowF>
@@ -1852,10 +1707,45 @@ export default function App() {
 
                 return (
                   <InfoWindowF
+                    key={`info-${selectedParkingLotId}`}
                     position={center}
                     onCloseClick={() => setSelectedParkingLotId(null)}
+                    options={{
+                      disableAutoPan: false
+                    }}
+                    onLoad={(infoWindow) => {
+                      // Immediately hide the close button using requestAnimationFrame for instant execution
+                      requestAnimationFrame(() => {
+                        const closeButtons = document.querySelectorAll('.gm-ui-hover-effect');
+                        closeButtons.forEach((btn) => {
+                          if (btn instanceof HTMLElement) {
+                            btn.style.setProperty('display', 'none', 'important');
+                            btn.style.setProperty('visibility', 'hidden', 'important');
+                            btn.style.setProperty('opacity', '0', 'important');
+                            btn.style.setProperty('pointer-events', 'none', 'important');
+                          }
+                        });
+                      });
+                    }}
                   >
-                    <div style={{ color: '#0b1220', maxWidth: 260 }}>
+                    <div 
+                      style={{ 
+                        color: '#0b1220', 
+                        maxWidth: 260,
+                        cursor: 'pointer',
+                        padding: '4px'
+                      }}
+                      onClick={() => setSelectedParkingLotId(null)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedParkingLotId(null);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label="Close parking lot information"
+                    >
                       <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedParkingLot.lotName ?? 'Parking lot'}</div>
                       <div style={{ fontSize: 13, lineHeight: 1.3 }}>
                         Owner: {selectedParkingLot.ownership ?? '—'}
@@ -1863,6 +1753,9 @@ export default function App() {
                         Capacity: {selectedParkingLot.capacity ?? '—'}
                         <br />
                         Accessible spaces: {selectedParkingLot.handicapSpace ?? '—'}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#666', marginTop: 8, fontStyle: 'italic' }}>
+                        Click anywhere to close
                       </div>
                     </div>
                   </InfoWindowF>
@@ -1872,11 +1765,364 @@ export default function App() {
           ) : (
             <div className="toast">
               <strong>Loading map…</strong>
-              <div className="help">If this doesn’t load, confirm the API key is set.</div>
+              <div className="help">If this doesn't load, confirm the API key is set.</div>
             </div>
           )}
         </div>
       </main>
+
+      <aside className={`sidebar sidebarRight ${isRightCollapsed ? 'collapsed' : ''}`} aria-label={tr('results')}>
+        <button
+          className={`panelToggle panelToggleRight ${isRightCollapsed ? 'collapsed' : ''}`}
+          onClick={() => setIsRightCollapsed(!isRightCollapsed)}
+          aria-label={isRightCollapsed ? tr('showRightPanel') : tr('hideRightPanel')}
+        >
+          <div className="panelToggleInner">{isRightCollapsed ? '←' : '→'}</div>
+        </button>
+        <div className="sidebarScroll" aria-label={tr('lists')}>
+          {routeSummary ? (
+            <div className="card" role="region" aria-label={tr('navigationDirections')}>
+              <div className="label">{tr('navigation')}</div>
+              <div className="itemMeta">
+                {tr('distance')}: {routeSummary.distance || '—'}
+                <br />
+                {travelMode === 'DRIVING' ? (
+                  <>
+                    {tr('withTraffic')}: {routeSummary.durationTraffic || routeSummary.duration || '—'}
+                    <br />
+                    {tr('base')}: {routeSummary.durationBase || '—'}
+                    <br />
+                    {tr('delay')}: {routeSummary.durationDelay || '—'}
+                  </>
+                ) : (
+                  <>{tr('time')}: {routeSummary.duration || '—'}</>
+                )}
+              </div>
+
+              <div style={{ height: 10 }} />
+
+              <div className="list" role="list">
+                {routeSummary.legs.flatMap((leg, legIdx) => {
+                  const showLegHeader = routeSummary.legs.length > 1;
+
+                  const header = showLegHeader ? (
+                    <div key={`leg-h-${legIdx}`} className="item" role="listitem">
+                      <div className="itemTitle">{tr('leg')} {legIdx + 1}</div>
+                      <div className="itemMeta">
+                        {tr('from')}: {leg.start || '—'}
+                        <br />
+                        {tr('to')}: {leg.end || '—'}
+                        <br />
+                        {leg.distance ? `${tr('distance')}: ${leg.distance}` : `${tr('distance')}: —`}
+                        {leg.duration ? ` • ${tr('time')}: ${leg.duration}` : null}
+                      </div>
+                    </div>
+                  ) : null;
+
+                  const steps = leg.steps.map((st, stepIdx) => {
+                    const t = st.transitSummary;
+                    return (
+                      <div key={`leg-${legIdx}-step-${stepIdx}`} className="item" role="listitem">
+                        <div className="itemTitle">{tr('step')} {stepIdx + 1}</div>
+                        <div className="itemMeta">
+                          {t ? (
+                            <>
+                              {t.vehicle ?? tr('transit')} {t.line ? `(${t.line})` : ''}
+                              {t.headsign ? ` ${tr('toward')} ${t.headsign}` : ''}
+                              <br />
+                              {tr('from')}: {t.from ?? '—'}
+                              <br />
+                              {tr('to')}: {t.to ?? '—'}
+                              <br />
+                              {tr('stops')}: {typeof t.stops === 'number' ? t.stops : '—'}
+                              <br />
+                            </>
+                          ) : null}
+                          {st.instruction || '—'}
+                          <br />
+                          {st.distance ? `${tr('distance')}: ${st.distance}` : null}
+                          {st.duration ? ` • ${tr('time')}: ${st.duration}` : null}
+                        </div>
+                      </div>
+                    );
+                  });
+
+                  return header ? [header, ...steps] : steps;
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="tabs" role="tablist" aria-label={tr('listTabs')}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'results'}
+              className={`tabButton ${activeTab === 'results' ? 'active' : ''}`}
+              onClick={() => setActiveTab('results')}
+            >
+              Results ({resultsCount})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'lots'}
+              className={`tabButton ${activeTab === 'lots' ? 'active' : ''}`}
+              onClick={() => setActiveTab('lots')}
+            >
+              Parking lots ({parkingLotsCount})
+            </button>
+          </div>
+
+          {activeTab === 'results' ? (
+            <div className="card" role="region" aria-label="Results list">
+              <div className="label">Results ({resultsCount})</div>
+              <div className="list" role="list">
+                {!refPos ? (
+                  <div className="help">
+                    {tr('typeDestinationOrRelocate', { example: 'Metro', relocate: tr('relocate') })}
+                  </div>
+                ) : refPos ? (
+                  <div className="item" role="listitem">
+                    <div className="itemHeader">
+                      <div>
+                        <div className="itemTitle">{destinationLabel ?? 'Selected destination'}</div>
+                        <div className="itemMeta">
+                          Destination
+                          <br />
+                          Lat: {refPos.lat.toFixed(5)}
+                          <br />
+                          Lng: {refPos.lng.toFixed(5)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="row">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusMsg(`Selected: ${destinationLabel ?? 'Destination'}`);
+                          if (mapRef.current) {
+                            mapRef.current.panTo(refPos);
+                            mapRef.current.setZoom(15);
+                          }
+                        }}
+                      >
+                        View on map
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => routeToViaAccessibleSpot(refPos, destinationLabel ?? 'Destination')}
+                      >
+                        Navigate (via accessible parking)
+                      </button>
+                    </div>
+
+                    <div style={{ height: 10 }} />
+
+                    {nearbyAccessibleFeatures ? (
+                      <div className="itemMeta" style={{ marginBottom: 10, padding: '12px', backgroundColor: 'rgba(0, 0, 0, 0.15)', borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                        <strong style={{ display: 'block', marginBottom: '8px', color: 'var(--text)' }}>{tr('nearbyAccessibilityFeatures' as any, { radius: 500 })}:</strong>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' }}>
+                          {nearbyAccessibleFeatures.byType.map(({ type, count }) => (
+                            <div key={type} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                              <span>{type}:</span>
+                              <strong>{count}</strong>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: '0.9em', color: 'var(--muted)', borderTop: '1px solid rgba(255, 255, 255, 0.12)', paddingTop: '6px', marginTop: '6px' }}>
+                          {tr('total')}: <strong>{nearbyAccessibleFeatures.total}</strong> {tr('features')}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="itemMeta">
+                      Nearest accessible options (Top 5)
+                    </div>
+                    {nearestError ? (
+                      <div className="itemMeta" style={{ marginTop: 8 }}>
+                        {nearestError}
+                      </div>
+                    ) : null}
+                    <div className="list" role="list">
+                      {isNearestLoading ? (
+                        <>
+                          <div className="progressBar" style={{ marginTop: '12px' }} role="progressbar" aria-valuenow={0} aria-valuemin={0} aria-valuemax={100}>
+                            <div className="progressBarFill"></div>
+                          </div>
+                          {[1, 2, 3].map((i) => (
+                            <div key={i} className="skeletonItem" aria-hidden="true">
+                              <div className="skeletonText skeletonTextLarge"></div>
+                              <div className="skeletonText"></div>
+                              <div className="skeletonText skeletonTextSmall"></div>
+                            </div>
+                          ))}
+                        </>
+                      ) : nearestOptions.length === 0 ? (
+                        <div className="help">No accessible parking lots found.</div>
+                      ) : (
+                        nearestOptions.map((opt) => (
+                          <div key={`${opt.kind}-${opt.id}`} className="item" role="listitem">
+                            <div className="itemTitle">{opt.label}</div>
+                            <div className="itemMeta">
+                              Type: Parking lot
+                              <br />
+                              Distance: {formatDistance(opt.distanceMeters)}
+                              {opt.meta ? (
+                                <>
+                                  <br />
+                                  {opt.meta}
+                                </>
+                              ) : null}
+                            </div>
+                            <div style={{ height: 10 }} />
+                            <div className="row">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRouteWaypoint({ lat: opt.lat, lng: opt.lng, label: opt.label, kind: 'lot', id: opt.id });
+                                  if (mapRef.current) mapRef.current.panTo({ lat: opt.lat, lng: opt.lng });
+                                  setStatusMsg('Waypoint updated. Click Navigate again to reroute.');
+                                }}
+                              >
+                                Use as waypoint
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {spots.length === 0 && !refPos ? (
+                  <div className="help">
+                    No accessible parking lots match.
+                    {parkingLotsCount > 0 ? (
+                      <>
+                        {' '}
+                        Found {parkingLotsCount} matching parking lot{parkingLotsCount === 1 ? '' : 's'}.{' '}
+                        <button type="button" className="linkButton" onClick={() => setActiveTab('lots')}>
+                          View parking lots
+                        </button>
+                      </>
+                    ) : (
+                      <> Try increasing distance or clearing search.</>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="card" role="region" aria-label="Parking lot areas dataset">
+              <div className="label">Parking lots ({filteredParkingLots.length})</div>
+              {parkingLotsError ? <div className="help">{parkingLotsError}</div> : null}
+              <div className="list" role="list">
+                {filteredParkingLots.map((l) => {
+                  const handicap = l.handicapSpace ?? '—';
+                  const capacity = l.capacity ?? '—';
+
+                  return (
+                    <div key={l.id} className="item" role="listitem">
+                      <div className="itemHeader">
+                        <div>
+                          <div className="itemTitle">{l.lotName ?? 'Unnamed lot'}</div>
+                          <div className="itemMeta">
+                            Owner: {l.ownership ?? '—'}
+                            <br />
+                            Capacity: {capacity}
+                            <br />
+                            Accessible spaces: {handicap}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ height: 10 }} />
+
+                      <div className="row">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              setSelectedParkingLotId(l.id);
+
+                              const fitOk = fitMapToParkingLot(l.id);
+                              if (fitOk) {
+                                setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                                return;
+                              }
+
+                              // Fallback when no geometry exists for this lot.
+                              setStatusMsg(`Locating: ${l.lotName ?? 'Parking lot'}…`);
+                              const pos = await geocodeParkingLot(l);
+                              if (mapRef.current) mapRef.current.panTo(pos);
+                              setStatusMsg(`Showing on map: ${l.lotName ?? 'Parking lot'}`);
+                            } catch {
+                              setStatusMsg('Could not locate this parking lot on the map.');
+                            }
+                          }}
+                        >
+                          View on map
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => {
+                            const ok = fitMapToParkingLot(l.id);
+                            if (!ok) {
+                              setStatusMsg('This lot has no boundary geometry available.');
+                              return;
+                            }
+
+                            const geom = parkingLotGeometries[l.id];
+                            const b = new google.maps.LatLngBounds();
+                            for (const poly of geom.polygons) {
+                              for (const ring of poly) {
+                                for (const pt of ring) b.extend(pt);
+                              }
+                            }
+                            const c = (() => {
+                              if (b.isEmpty()) return DEFAULT_CENTER;
+                              const center = b.getCenter();
+                              return { lat: center.lat(), lng: center.lng() };
+                            })();
+                            routeTo(c, l.lotName ?? 'Parking lot');
+                          }}
+                        >
+                          Navigate
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {filteredParkingLots.length === 0 ? (
+                  <div className="help">No parking lots match your search.</div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          <div className="help" style={{ marginTop: '20px', padding: '16px', backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}>{tr('privacyNotice' as any)}</div>
+            <div style={{ fontSize: '12px', lineHeight: '1.6', color: 'var(--muted)', marginBottom: '8px' }}>
+              {tr('privacyText' as any)}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)', fontStyle: 'italic' }}>
+              {tr('privacyContact' as any)}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
+              {tr('dataSource')}
+            </div>
+          </div>
+
+        </div>
+      </aside>
     </div>
   );
 }
