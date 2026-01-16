@@ -2,7 +2,7 @@
 
 A comprehensive web application designed to help users find accessible parking spaces in Kingston, Ontario. Built with accessibility, privacy, and user experience in mind.
 
-## 🌟 Features
+## Features
 
 ### Core Functionality
 
@@ -55,10 +55,10 @@ A comprehensive web application designed to help users find accessible parking s
   - Map expands to fill available space
 
 - **Keyboard Shortcuts**
-  - `Ctrl+K` / `⌘K`: Focus chat input
-  - `Ctrl+L` / `⌘L`: Relocate user position
-  - `Ctrl+[` / `⌘[`: Toggle left panel
-  - `Ctrl+]` / `⌘]`: Toggle right panel
+  - `Ctrl+K` / `Cmd+K`: Focus chat input
+  - `Ctrl+L` / `Cmd+L`: Relocate user position
+  - `Ctrl+[` / `Cmd+[`: Toggle left panel
+  - `Ctrl+]` / `Cmd+]`: Toggle right panel
   - `?`: Show keyboard shortcuts help
 
 - **Loading States**
@@ -105,7 +105,7 @@ A comprehensive web application designed to help users find accessible parking s
   - Secure API key handling
   - No sensitive data in client code
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 ### Frontend
 - **React 18.3** - UI framework
@@ -127,7 +127,7 @@ A comprehensive web application designed to help users find accessible parking s
   - Parking Lot Areas (CSV + GeoJSON)
   - Accessible Features at Kingston Facilities (CSV)
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 
@@ -152,16 +152,18 @@ A comprehensive web application designed to help users find accessible parking s
    
    Create a `.env.local` file in the root directory:
    ```env
+   # Frontend environment variables
    VITE_GOOGLE_MAPS_API_KEY=your_google_maps_api_key
    VITE_BACKBOARD_LLM_PROVIDER=google
    VITE_BACKBOARD_MODEL_NAME=gemini-2.5-flash
+   
+   # Backend environment variables
+   VITE_BACKBOARD_API_KEY=your_backboard_api_key
+   # Alternative: BACKBOARD_API_KEY=your_backboard_api_key
+   PORT=8787
    ```
-
-   For the backend server, create `.env.local` in the root:
-   ```env
-   BACKBOARD_API_KEY=your_backboard_api_key
-   BACKBOARD_BASE_URL=https://api.backboard.ai
-   ```
+   
+   Note: The `.env.local` file is already in `.gitignore` and will not be committed to the repository.
 
 4. **Start the development server**
    ```bash
@@ -176,7 +178,7 @@ A comprehensive web application designed to help users find accessible parking s
    - Frontend: http://localhost:5173
    - Backend API: http://localhost:8787
 
-## 🚀 Usage
+## Usage
 
 ### Basic Workflow
 
@@ -216,56 +218,31 @@ A comprehensive web application designed to help users find accessible parking s
   - All UI text updates immediately
   - Preference saved in localStorage
 
-## 📁 Project Structure
-
-```
-Accessible_Parking_locator/
-├── src/
-│   ├── App.tsx                 # Main application component
-│   ├── main.tsx                # Entry point
-│   ├── styles.css              # Global styles
-│   ├── i18n.ts                 # Internationalization
-│   ├── types.ts                # TypeScript type definitions
-│   ├── backboard.ts            # AI/LLM integration
-│   ├── geo.ts                  # Geospatial utilities
-│   ├── parkingLots.ts          # Parking lot data parsing
-│   ├── accessibleFeatures.ts   # Accessible features parsing
-│   ├── mockData.ts             # Mock data (if needed)
-│   └── *.csv, *.geojson        # Data files
-├── public/
-│   └── manifest.json           # PWA manifest
-├── server.mjs                  # Backend API server
-├── vite.config.ts             # Vite configuration
-├── tsconfig.json              # TypeScript configuration
-├── package.json               # Dependencies and scripts
-└── README.md                  # This file
-```
-
-## ⚙️ Configuration
+## Configuration
 
 ### Environment Variables
 
-#### Frontend (.env.local)
+#### Frontend Environment Variables
 - `VITE_GOOGLE_MAPS_API_KEY` - Required. Your Google Maps API key
 - `VITE_BACKBOARD_LLM_PROVIDER` - Optional. Default: "google"
 - `VITE_BACKBOARD_MODEL_NAME` - Optional. Default: "gemini-2.5-flash"
 
-#### Backend (.env.local)
-- `BACKBOARD_API_KEY` - Required for AI features
-- `BACKBOARD_BASE_URL` - Optional. Default: Backboard API URL
+#### Backend Environment Variables
+- `VITE_BACKBOARD_API_KEY` or `BACKBOARD_API_KEY` - Required for AI features
+- `PORT` - Optional. Default: 8787
 
 ### API Endpoints
 
-#### Frontend Proxy (via Vite)
-- `/api/ai/parse` - Parse natural language constraints
-- `/api/ai/chat` - Chat with AI assistant
-
 #### Backend Server (port 8787)
-- `POST /api/ai/parse` - Parse user constraints
-- `POST /api/ai/chat` - Chat endpoint
-- `GET /health` - Health check
+- `GET /api/health` - Health check endpoint
+- `GET /api/nearest` - Get nearest parking lots
+- `GET /api/predict` - Predict parking availability
+- `POST /api/ai/thread` - Create or retrieve AI conversation thread
+- `POST /api/ai/recommend-parking` - Get AI-powered parking recommendations
+- `POST /api/ai/message` - Send message to AI assistant
+- `POST /api/ai/reset-thread` - Reset AI conversation thread
 
-## 🏗️ Development
+## Development
 
 ### Available Scripts
 
@@ -288,7 +265,7 @@ Output will be in the `dist/` directory.
 - ESLint configuration (if configured)
 - Consistent formatting
 
-## 🧪 Testing
+## Testing
 
 ### Manual Testing Checklist
 
@@ -302,7 +279,7 @@ Output will be in the `dist/` directory.
 - [ ] Accessibility features display
 - [ ] Mobile responsiveness
 
-## 📝 Data Sources
+## Data Sources
 
 - **Kingston Open Data**
   - Parking Lot Areas dataset
@@ -312,7 +289,7 @@ All data is processed locally in the browser. No data is sent to external server
 - Google Maps API (for map rendering and directions)
 - Backboard AI API (for natural language processing, if enabled)
 
-## 🔒 Privacy & Security
+## Privacy & Security
 
 - **MFIPPA Compliance**
   - No personal information collected
@@ -326,7 +303,7 @@ All data is processed locally in the browser. No data is sent to external server
   - API keys stored in environment variables
   - Secure API communication
 
-## ♿ Accessibility Features
+## Accessibility Features
 
 - **AODA Compliance**
   - WCAG 2.1 Level AA standards
@@ -341,7 +318,7 @@ All data is processed locally in the browser. No data is sent to external server
   - Skip links for main content
   - Keyboard shortcuts documented
 
-## 🌍 Internationalization
+## Internationalization
 
 - **Supported Languages**
   - English (EN)
@@ -353,14 +330,14 @@ All data is processed locally in the browser. No data is sent to external server
   - Persistent language preference
   - Proper locale formatting
 
-## 📱 Progressive Web App (PWA)
+## Progressive Web App (PWA)
 
 - Installable on mobile devices
 - Offline capability (limited)
 - App manifest configured
 - Service worker ready (if implemented)
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -368,21 +345,21 @@ All data is processed locally in the browser. No data is sent to external server
 4. Test thoroughly
 5. Submit a pull request
 
-## 📄 License
+## License
 
 See LICENSE file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Kingston Open Data for providing parking and accessibility datasets
 - Google Maps Platform for mapping services
 - Backboard AI for natural language processing
 - React and Vite communities
 
-## 📞 Support
+## Support
 
 For issues, questions, or contributions, please open an issue on the repository.
 
 ---
 
-**Built with ❤️ for accessibility and inclusion**
+**Built for accessibility and inclusion**
