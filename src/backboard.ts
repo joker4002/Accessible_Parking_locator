@@ -110,7 +110,16 @@ export async function backboardGetOrCreateThread(): Promise<{ assistant_id: stri
   return { assistant_id: created.assistant_id, thread_id: created.thread_id };
 }
 
-export function backboardResetThread(): void {
+export async function backboardResetThread(): Promise<void> {
   localStorage.removeItem(LS_ASSISTANT_ID);
   localStorage.removeItem(LS_THREAD_ID);
+  // Also reset the server-side cached thread
+  try {
+    await fetch('/api/ai/reset-thread', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch {
+    // Ignore errors - server reset is best-effort
+  }
 }

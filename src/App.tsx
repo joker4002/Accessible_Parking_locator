@@ -82,6 +82,8 @@ export default function App() {
   const [isAiChatLoading, setIsAiChatLoading] = useState<boolean>(false);
   const [chatPlaceSuggestions, setChatPlaceSuggestions] = useState<Array<{ label: string; lat: number; lng: number }>>([]);
   const [chatPendingQuery, setChatPendingQuery] = useState<string | null>(null);
+  const [userMaxWalkDistance, setUserMaxWalkDistance] = useState<number | null>(null); // User's walking limit in meters
+  const [aiSuggestedParkingLot, setAiSuggestedParkingLot] = useState<string | null>(null); // Parking lot suggested by AI for user to confirm
   const [nearestOptions, setNearestOptions] = useState<
     Array<{ id: string; kind: 'lot'; label: string; lat: number; lng: number; distanceMeters: number; meta?: string }>
   >([]);
@@ -258,30 +260,55 @@ export default function App() {
   const extractPlaceName = (message: string): string | null => {
     const lower = message.toLowerCase().trim();
     
-    // Common patterns for destination queries
+    // First, try to extract location from "in [location]" or "near [location]" patterns
+    const locationPatterns = [
+      /(?:in|near|around|at|to)\s+(?:downtown\s+)?kingston/i,
+      /(?:in|near|around|at)\s+(downtown|uptown|waterfront|university|queen'?s)/i,
+      /(?:parking\s+(?:lot|space|spot)s?\s+(?:in|near|at)\s+)(.+?)(?:\s*$|,|\.)/i,
+    ];
+
+    // Check for area-based queries first
+    const areaMatch = lower.match(/(?:in|near|around|at)\s+(downtown|uptown|waterfront|university|queen'?s)/i);
+    if (areaMatch) {
+      return areaMatch[1];
+    }
+
+    // Check for "parking in [location]" pattern
+    const parkingInMatch = message.match(/parking\s+(?:lot|space|spot)s?\s+(?:in|near|at)\s+(.+?)(?:\s*$|,|\.)/i);
+    if (parkingInMatch && parkingInMatch[1]) {
+      const place = parkingInMatch[1].trim();
+      if (place.length >= 2 && !['me', 'a', 'the', 'an'].includes(place.toLowerCase())) {
+        return place;
+      }
+    }
+
+    // Common patterns for destination queries - more specific
     const patterns = [
-      /(?:going to|want to go to|heading to|visiting|need to go to|looking for)\s+(.+?)(?:\s|$|,|\.)/i,
-      /(?:go to|visit|find|search for|looking for)\s+(.+?)(?:\s|$|,|\.)/i,
-      /^(.+?)(?:\s+in\s+kingston|\s+kingston|$)/i, // Simple place name at start
+      /(?:going to|want to go to|heading to|visiting|need to go to)\s+(?:the\s+)?(.+?)(?:\s+in\s+kingston|\s*$|,|\.)/i,
+      /(?:looking for|search for|find)\s+(?:a\s+)?(?:parking\s+(?:lot|space|spot)s?\s+)?(?:in|near|at|around)\s+(.+?)(?:\s*$|,|\.)/i,
     ];
 
     for (const pattern of patterns) {
       const match = message.match(pattern);
       if (match && match[1]) {
         const place = match[1].trim();
-        // Remove common stop words and location words
+        // Remove common stop words and filler words
         const cleaned = place
-          .replace(/\b(the|a|an|in|at|on|near|by|around)\b/gi, '')
+          .replace(/\b(the|a|an|in|at|on|near|by|around|me|my|please)\b/gi, '')
           .trim();
-        if (cleaned.length >= 2) {
+        // Skip if the result is a common word or too short
+        if (cleaned.length >= 3 && !['parking', 'lot', 'space', 'spot', 'area'].includes(cleaned.toLowerCase())) {
           return cleaned;
         }
       }
     }
 
-    // If no pattern matches, try the whole message (might be just a place name)
-    if (lower.length >= 2 && lower.length < 50) {
-      return message.trim();
+    // If the message is short and looks like a place name (no common verbs), use it directly
+    if (lower.length >= 2 && lower.length < 30) {
+      // Skip if it contains common request phrases
+      if (!/\b(find|search|get|show|give|help|please|me|my|a|the|parking|lot)\b/i.test(lower)) {
+        return message.trim();
+      }
     }
 
     return null;
@@ -291,73 +318,521 @@ export default function App() {
     const msg = aiChatInput.trim();
     if (!msg) return;
 
+    // Check if user is confirming a parking lot suggestion or asking to go to a specific lot
+    const confirmPatterns = /^(yes|yeah|yep|ok|okay|sure|please|go ahead|let's go|take me there|navigate|directions?)\.?$/i;
+    const goToPattern = /^(go to|navigate to|take me to|let's go to|head to)\s+(.+)$/i;
+    const goToMatch = goToPattern.exec(msg);
+    
+    // Check if user is saying "go to [parking lot name]"
+    if (goToMatch && refPos && destinationLabel) {
+      const targetName = goToMatch[2].trim().toLowerCase();
+      const matchingLot = spots.find(s => 
+        s.name.toLowerCase().includes(targetName) || 
+        targetName.includes(s.name.toLowerCase().split(' ')[0])
+      );
+      
+      if (matchingLot) {
+        // User wants to go to a specific parking lot
+        setAiChatMessages((prev) => [...prev, 
+          { role: 'user', content: msg },
+          { role: 'assistant', content: `Great! Navigating to ${destinationLabel} via ${matchingLot.name}. The route is now displayed on the map!` }
+        ]);
+        setSelectedParkingLotId(matchingLot.id);
+        setAiSuggestedParkingLot(null);
+        
+        // Set the waypoint and trigger navigation
+        setRouteWaypoint({ 
+          lat: matchingLot.lat, 
+          lng: matchingLot.lng, 
+          label: matchingLot.name, 
+          kind: 'lot', 
+          id: matchingLot.id 
+        });
+        
+        setTimeout(() => {
+          if (userPos) {
+            const svc = new google.maps.DirectionsService();
+            const request: google.maps.DirectionsRequest = {
+              origin: userPos,
+              destination: refPos,
+              waypoints: [{ location: { lat: matchingLot.lat, lng: matchingLot.lng }, stopover: true }],
+              optimizeWaypoints: false,
+              travelMode: google.maps.TravelMode[travelMode],
+              provideRouteAlternatives: false
+            };
+            
+            svc.route(request, (result, status) => {
+              if (status === 'OK' && result) {
+                setDirections(result);
+                setLastRoute({ destination: refPos, label: destinationLabel, viaAccessibleSpot: true });
+                const b = result.routes?.[0]?.bounds;
+                if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
+                setStatusMsg(`Route to ${destinationLabel} via ${matchingLot.name} shown on map.`);
+              }
+            });
+          } else {
+            if (mapRef.current) {
+              const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+              if (gmaps) {
+                const b = new gmaps.LatLngBounds();
+                b.extend(refPos);
+                b.extend({ lat: matchingLot.lat, lng: matchingLot.lng });
+                mapRef.current.fitBounds(b, 72);
+              }
+            }
+            setStatusMsg(`Selected ${matchingLot.name}. Click "Locate me" to enable navigation.`);
+          }
+        }, 100);
+        
+        return;
+      }
+    }
+    
+    // Check if user is confirming a suggested parking lot
+    console.log('Checking confirmation - aiSuggestedParkingLot:', aiSuggestedParkingLot, 'refPos:', !!refPos, 'destinationLabel:', destinationLabel);
+    if (confirmPatterns.test(msg) && aiSuggestedParkingLot && refPos && destinationLabel) {
+      // User confirmed - find and select the suggested parking lot
+      const suggestedLower = aiSuggestedParkingLot.toLowerCase();
+      console.log('Looking for lot matching:', suggestedLower);
+      
+      // More precise matching - look for exact name or significant part
+      const matchingLot = spots.find(s => {
+        const spotLower = s.name.toLowerCase();
+        // Check if the suggested name contains the key part of the spot name
+        const keyPart = spotLower.split(' ')[0]; // e.g., "mckee" from "mckee memorial lot"
+        return spotLower.includes(suggestedLower) || 
+               suggestedLower.includes(spotLower) ||
+               suggestedLower.includes(keyPart);
+      });
+      
+      console.log('Matching lot found:', matchingLot?.name);
+      
+      if (matchingLot) {
+        setAiChatMessages((prev) => [...prev, 
+          { role: 'user', content: msg },
+          { role: 'assistant', content: `Great! Navigating to ${destinationLabel} via ${matchingLot.name}. The route is now displayed on the map!` }
+        ]);
+        setSelectedParkingLotId(matchingLot.id);
+        setAiSuggestedParkingLot(null);
+        
+        // Set the waypoint to the suggested parking lot
+        setRouteWaypoint({ 
+          lat: matchingLot.lat, 
+          lng: matchingLot.lng, 
+          label: matchingLot.name, 
+          kind: 'lot', 
+          id: matchingLot.id 
+        });
+        
+        // Trigger navigation via the suggested parking lot
+        // Use setTimeout to ensure state updates are applied first
+        setTimeout(() => {
+          if (userPos) {
+            // Navigate from user position → parking lot → destination
+            const svc = new google.maps.DirectionsService();
+            const request: google.maps.DirectionsRequest = {
+              origin: userPos,
+              destination: refPos,
+              waypoints: [{ location: { lat: matchingLot.lat, lng: matchingLot.lng }, stopover: true }],
+              optimizeWaypoints: false,
+              travelMode: google.maps.TravelMode[travelMode],
+              provideRouteAlternatives: false
+            };
+            
+            svc.route(request, (result, status) => {
+              if (status === 'OK' && result) {
+                setDirections(result);
+                setLastRoute({ destination: refPos, label: destinationLabel, viaAccessibleSpot: true });
+                const b = result.routes?.[0]?.bounds;
+                if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
+                setStatusMsg(`Route to ${destinationLabel} via ${matchingLot.name} shown on map.`);
+              }
+            });
+          } else {
+            // No user position - just fit map to show parking and destination
+            if (mapRef.current) {
+              const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+              if (gmaps) {
+                const b = new gmaps.LatLngBounds();
+                b.extend(refPos);
+                b.extend({ lat: matchingLot.lat, lng: matchingLot.lng });
+                mapRef.current.fitBounds(b, 72);
+              }
+            }
+            setStatusMsg(`Selected ${matchingLot.name}. Click "Locate me" to enable navigation.`);
+          }
+        }, 100);
+        
+        return;
+      }
+    }
+
     setIsAiChatLoading(true);
     setAiChatError(null);
     setAiChatInput('');
     setChatPlaceSuggestions([]);
     setChatPendingQuery(null);
+    setNearestOptions([]);
     setAiChatMessages((prev) => [...prev, { role: 'user', content: msg }]);
 
     try {
-      // First, try to extract place name and search for places
-      const placeName = extractPlaceName(msg);
-      if (placeName) {
-        try {
-          const places = await searchPlacesFree(placeName);
-          if (places.length > 0) {
-            setChatPlaceSuggestions(places);
-            setChatPendingQuery(placeName);
+      // All inputs go through AI first
+      const aiController = new AbortController();
+      const aiTimeout = setTimeout(() => aiController.abort(), 30000); // 30 second timeout for AI
+
+      try {
+        const userPosForApi = userPos || refPos;
+        
+        // Build context-aware message for AI
+        let contextMessage = msg;
+        
+        // Add current destination context if available
+        if (destinationLabel && refPos) {
+          contextMessage = `[Context: User's destination is "${destinationLabel}". `;
+          
+          // Add current parking options if available (using 'spots' which is the useMemo variable)
+          if (spots.length > 0) {
+            const parkingList = spots.slice(0, 5).map((s, i) => 
+              `${i + 1}. ${s.name} (${formatDistance(s.distanceMeters)})`
+            ).join(', ');
+            contextMessage += `Available parking options near destination: ${parkingList}. `;
+          }
+          
+          // Add selected parking lot if any
+          if (selectedParkingLotId) {
+            const selectedLot = spots.find(s => s.id === selectedParkingLotId);
+            if (selectedLot) {
+              contextMessage += `User has selected: ${selectedLot.name}. `;
+            }
+          }
+          
+          contextMessage += `]\n\nUser's message: ${msg}`;
+          
+          // Debug: log the context being sent
+          console.log('AI Context:', contextMessage);
+        } else {
+          console.log('No context available - destinationLabel:', destinationLabel, 'refPos:', refPos);
+        }
+
+        const recommendRes = await fetch('/api/ai/recommend-parking', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            message: contextMessage,
+            lat: userPosForApi?.lat,
+            lng: userPosForApi?.lng,
+            llm_provider: backboardLlmProvider,
+            model_name: backboardModelName
+          }),
+          signal: aiController.signal
+        });
+
+        clearTimeout(aiTimeout);
+
+        if (recommendRes.ok) {
+          const recommendData = await recommendRes.json();
+          const recommendations = recommendData.recommendations || [];
+          const aiResponse = recommendData.aiResponse || '';
+          const detectedDestination = recommendData.intent?.destination;
+          const maxWalk = recommendData.intent?.maxWalkDistance || null;
+          
+          // Store user's walking limit for later use
+          if (maxWalk) {
+            setUserMaxWalkDistance(maxWalk);
+          }
+          
+          // Case 1: AI is having a conversation (no destination found)
+          if (recommendData.isConversation) {
+            // Check if server wants to navigate to a parking lot
+            const navigateTo = recommendData.navigateTo;
+            if (navigateTo && refPos && destinationLabel) {
+              const targetLower = navigateTo.toLowerCase();
+              const matchingLot = spots.find(s => 
+                s.name.toLowerCase().includes(targetLower) || 
+                targetLower.includes(s.name.toLowerCase().split(' ')[0])
+              );
+              
+              if (matchingLot) {
+                console.log('Server requested navigation to:', matchingLot.name);
+                setAiChatMessages((prev) => [...prev, { 
+                  role: 'assistant', 
+                  content: aiResponse
+                }]);
+                setSelectedParkingLotId(matchingLot.id);
+                setAiSuggestedParkingLot(null);
+                
+                // Set waypoint and trigger navigation
+                setRouteWaypoint({ 
+                  lat: matchingLot.lat, 
+                  lng: matchingLot.lng, 
+                  label: matchingLot.name, 
+                  kind: 'lot', 
+                  id: matchingLot.id 
+                });
+                
+                setTimeout(() => {
+                  if (userPos) {
+                    const svc = new google.maps.DirectionsService();
+                    const request: google.maps.DirectionsRequest = {
+                      origin: userPos,
+                      destination: refPos,
+                      waypoints: [{ location: { lat: matchingLot.lat, lng: matchingLot.lng }, stopover: true }],
+                      optimizeWaypoints: false,
+                      travelMode: google.maps.TravelMode[travelMode],
+                      provideRouteAlternatives: false
+                    };
+                    
+                    svc.route(request, (result, status) => {
+                      if (status === 'OK' && result) {
+                        setDirections(result);
+                        setLastRoute({ destination: refPos, label: destinationLabel, viaAccessibleSpot: true });
+                        const b = result.routes?.[0]?.bounds;
+                        if (b && mapRef.current) mapRef.current.fitBounds(b, 48);
+                        setStatusMsg(`Route to ${destinationLabel} via ${matchingLot.name} shown on map.`);
+                      }
+                    });
+                  } else {
+                    if (mapRef.current) {
+                      const gmaps = (globalThis as unknown as { google?: { maps?: typeof google.maps } }).google?.maps;
+                      if (gmaps) {
+                        const b = new gmaps.LatLngBounds();
+                        b.extend(refPos);
+                        b.extend({ lat: matchingLot.lat, lng: matchingLot.lng });
+                        mapRef.current.fitBounds(b, 72);
+                      }
+                    }
+                    setStatusMsg(`Selected ${matchingLot.name}. Click "Locate me" to enable navigation.`);
+                  }
+                }, 100);
+                
+                setIsAiChatLoading(false);
+                return;
+              }
+            }
+            
+            // Check if server suggested a specific parking lot (for confirmation)
+            const serverSuggestedLot = recommendData.suggestedParkingLot;
+            if (serverSuggestedLot) {
+              setAiSuggestedParkingLot(serverSuggestedLot);
+              console.log('Server suggested parking lot:', serverSuggestedLot);
+            } else {
+              // Parse AI response for parking lot suggestions more accurately
+              const aiResponseLower = aiResponse.toLowerCase();
+              
+              // Look for specific suggestion patterns
+              const suggestionPatterns = [
+                /suggest(?:ing)?\s+(?:trying\s+)?(?:the\s+)?([a-z\s]+(?:lot|garage|memorial))/i,
+                /next\s+(?:closest\s+)?(?:option\s+)?(?:is\s+)?(?:the\s+)?([a-z\s]+(?:lot|garage|memorial))/i,
+                /try\s+(?:the\s+)?([a-z\s]+(?:lot|garage|memorial))/i,
+                /([a-z\s]+(?:lot|garage|memorial))[\s,]+which\s+is\s+(?:about\s+)?\d+/i,
+                /directions?\s+to\s+(?:the\s+)?([a-z\s]+(?:lot|garage|memorial))/i
+              ];
+              
+              for (const pattern of suggestionPatterns) {
+                const match = aiResponseLower.match(pattern);
+                if (match) {
+                  const suggestedName = match[1].trim();
+                  // Find matching lot in spots
+                  const matchedSpot = spots.find(s => {
+                    const spotLower = s.name.toLowerCase();
+                    const keyPart = spotLower.split(' ')[0]; // e.g., "mckee"
+                    return suggestedName.includes(keyPart) || spotLower.includes(suggestedName);
+                  });
+                  
+                  if (matchedSpot && matchedSpot.id !== selectedParkingLotId) {
+                    setAiSuggestedParkingLot(matchedSpot.name);
+                    console.log('AI response suggested parking lot (pattern matched):', matchedSpot.name);
+                    break;
+                  }
+                }
+              }
+            }
+            
             setAiChatMessages((prev) => [...prev, { 
               role: 'assistant', 
-              content: tr('foundMatches', { count: places.length, query: placeName }) 
+              content: aiResponse
             }]);
             setIsAiChatLoading(false);
             return;
           }
-        } catch {
-          // If place search fails, continue with AI chat
-        }
-      }
+          
+          // Case 2: AI detected a place name - search for real locations and let user choose
+          if (detectedDestination) {
+            const searchTerm = detectedDestination + ' Kingston';
+            try {
+              const places = await searchPlacesFree(searchTerm);
+              if (places.length > 0) {
+                setChatPlaceSuggestions(places);
+                setChatPendingQuery(searchTerm);
+                // Show AI's response along with place options
+                const aiMessage = aiResponse || `I'll help you find parking near ${detectedDestination}.`;
+                const walkingNote = maxWalk ? `\n(Your walking limit: ${maxWalk}m)` : '';
+                setAiChatMessages((prev) => [...prev, { 
+                  role: 'assistant', 
+                  content: `${aiMessage}\n\nI found ${places.length} "${detectedDestination}" locations in Kingston. Please select one:${walkingNote}`
+                }]);
+                setIsAiChatLoading(false);
+                return;
+              }
+            } catch {
+              // Place search failed, continue with recommendations
+            }
+          }
+          
+          // Case 3: Show parking recommendations directly (place search failed or no specific destination)
+          if (recommendations.length > 0) {
+            // Convert recommendations to nearestOptions format
+            const options = recommendations.map((rec: any) => ({
+              id: rec.id,
+              kind: 'lot' as const,
+              label: rec.label,
+              lat: rec.lat,
+              lng: rec.lng,
+              distanceMeters: rec.distanceMeters,
+              meta: rec.handicapSpace ? `Accessible spaces: ${rec.handicapSpace}` : undefined
+            }));
 
-      // Also try searching the original message directly
-      try {
-        const places = await searchPlacesFree(msg);
-        if (places.length > 0) {
-          setChatPlaceSuggestions(places);
-          setChatPendingQuery(msg);
+            setNearestOptions(options);
+            
+            // Show AI's natural language response, or generate a summary if none
+            let chatResponse: string;
+            if (recommendData.aiResponse && recommendData.aiResponse.length > 0) {
+              // AI gave a natural language response - use it directly
+              // Replace any incorrect counts the AI might have mentioned
+              chatResponse = recommendData.aiResponse
+                .replace(/I found \d+ accessible/gi, `I found ${recommendations.length} accessible`)
+                .replace(/found \d+ parking/gi, `found ${recommendations.length} parking`);
+            } else {
+              // Generate a summary based on intent
+              const intentDesc = recommendData.intent?.intent || 'Based on your request';
+              chatResponse = `${intentDesc}. I found ${recommendations.length} accessible parking ${recommendations.length === 1 ? 'option' : 'options'} nearby.`;
+            }
+            
+            // Add warning if no options within user's max walk distance
+            const userMaxWalk = recommendData.userMaxWalk;
+            const withinWalkDistance = recommendData.withinWalkDistance;
+            const closestDistance = recommendData.closestDistance;
+            
+            if (userMaxWalk && withinWalkDistance === 0 && closestDistance) {
+              chatResponse += `\n\n⚠️ Note: Unfortunately, I couldn't find any parking within your ${userMaxWalk}m walking limit. The closest option is ${closestDistance}m away. Here are the nearest alternatives:`;
+            } else if (userMaxWalk && withinWalkDistance > 0 && withinWalkDistance < recommendations.length) {
+              chatResponse += `\n\n✓ ${withinWalkDistance} ${withinWalkDistance === 1 ? 'option is' : 'options are'} within your ${userMaxWalk}m limit.`;
+            }
+            
+            setAiChatMessages((prev) => [...prev, { 
+              role: 'assistant', 
+              content: chatResponse
+            }]);
+            
+            // Set refPos and destinationLabel to trigger the results display
+            // Use the actual destination (e.g., Metro), not the search center
+            const dest = recommendData.destination || recommendData.searchCenter;
+            if (dest) {
+              setRefPos(dest);
+              setDestinationLabel(recommendData.destinationLabel || recommendData.intent?.intent || msg);
+              
+              if (mapRef.current) {
+                mapRef.current.panTo(dest);
+                mapRef.current.setZoom(14);
+              }
+            }
+            
+            // Switch to results tab to show parking options
+            setActiveTab('results');
+            
+            setIsAiChatLoading(false);
+            return;
+          }
+          
+          // Case 3: AI responded but no parking found (conversational response)
+          if (recommendData.aiResponse) {
+            setAiChatMessages((prev) => [...prev, { 
+              role: 'assistant', 
+              content: recommendData.aiResponse
+            }]);
+            setIsAiChatLoading(false);
+            return;
+          }
+        }
+      } catch (recommendError: any) {
+        clearTimeout(aiTimeout);
+        const isTimeout = recommendError?.name === 'AbortError';
+        console.log('AI recommendation error:', recommendError?.name, recommendError?.message);
+        
+        // If user already has a destination selected (in conversation), handle timeout gracefully
+        if (isTimeout && destinationLabel && spots.length > 0) {
+          // User is in a conversation about parking - try to handle locally
+          const msgLower = msg.toLowerCase();
+          
+          // Check if user says a parking lot is full
+          if (msgLower.includes('full') || msgLower.includes('taken') || msgLower.includes('no space')) {
+            // Find which lot they mentioned
+            const mentionedLot = spots.find(s => msgLower.includes(s.name.toLowerCase().split(' ')[0].toLowerCase()));
+            if (mentionedLot) {
+              // Find the next available lot
+              const currentIndex = spots.findIndex(s => s.id === mentionedLot.id);
+              const nextLot = spots[currentIndex + 1] || spots.find(s => s.id !== mentionedLot.id);
+              if (nextLot) {
+                setAiSuggestedParkingLot(nextLot.name);
+                setAiChatMessages((prev) => [...prev, { 
+                  role: 'assistant', 
+                  content: `No problem! Since ${mentionedLot.name} is full, I suggest trying ${nextLot.name}, which is ${formatDistance(nextLot.distanceMeters)} away. Would you like to navigate there?`
+                }]);
+                setIsAiChatLoading(false);
+                return;
+              }
+            }
+          }
+          
+          // Generic in-conversation response
           setAiChatMessages((prev) => [...prev, { 
             role: 'assistant', 
-            content: tr('foundMatches', { count: places.length, query: msg }) 
+            content: `I'm having a bit of trouble, but I can still help! You're heading to ${destinationLabel}. The available parking options are:\n\n${spots.slice(0, 3).map((s, i) => `${i + 1}. ${s.name} (${formatDistance(s.distanceMeters)})`).join('\n')}\n\nWhich one would you like to try?`
           }]);
           setIsAiChatLoading(false);
           return;
         }
-      } catch {
-        // If place search fails, continue with AI chat
       }
 
-      // If no places found or search failed, use AI chat
-      const { thread_id } = await backboardGetOrCreateThread();
-      const res = await backboardSendMessage({
-        thread_id,
-        content: msg,
-        memory: 'Auto',
-        web_search: 'off',
-        llm_provider: backboardLlmProvider,
-        model_name: backboardModelName
-      });
-
-      const text = (res.content ?? '').trim();
-      const looksLikeQuotaError = /LLM Invocation Error|insufficient_quota|exceeded your current quota/i.test(text);
-      if (!text || looksLikeQuotaError) {
-        setAiChatError(
-          `AI error. Provider/model requested: ${backboardLlmProvider}/${backboardModelName}. ` +
-            'Backboard returned a quota/provider error. Enable the provider in Backboard dashboard or switch to a provider/model that is enabled for this API key.'
-        );
-        return;
+      // Fallback: AI failed and no conversation context, try place search as backup
+      const lowerMsg = msg.toLowerCase();
+      const placePatterns = [
+        { pattern: /\bmetro\b/i, search: 'Metro Kingston' },
+        { pattern: /\bshoppers\b/i, search: 'Shoppers Drug Mart Kingston' },
+        { pattern: /\bwalmart\b/i, search: 'Walmart Kingston' },
+        { pattern: /\bloblaws?\b/i, search: 'Loblaws Kingston' },
+        { pattern: /\bcostco\b/i, search: 'Costco Kingston' },
+        { pattern: /\bhospital\b|\bkgh\b/i, search: 'Kingston General Hospital' },
+        { pattern: /\buniversity\b|\bqueen'?s\b/i, search: "Queen's University Kingston" },
+        { pattern: /\bdowntown\b/i, search: 'Downtown Kingston' },
+      ];
+      
+      for (const { pattern, search } of placePatterns) {
+        if (pattern.test(msg)) {
+          try {
+            const places = await searchPlacesFree(search);
+            if (places.length > 0) {
+              setChatPlaceSuggestions(places);
+              setChatPendingQuery(search);
+              setAiChatMessages((prev) => [...prev, { 
+                role: 'assistant', 
+                content: `I found ${places.length} "${search.replace(' Kingston', '')}" locations. Please select one:`
+              }]);
+              setIsAiChatLoading(false);
+              return;
+            }
+          } catch {
+            // Continue to final fallback
+          }
+          break;
+        }
       }
 
-      setAiChatMessages((prev) => [...prev, { role: 'assistant', content: text }]);
+      // Final fallback: provide helpful guidance
+      setAiChatMessages((prev) => [...prev, { 
+        role: 'assistant', 
+        content: "I'd be happy to help you find parking! Could you tell me a specific destination in Kingston? For example:\n• \"Metro\" or \"Shoppers Drug Mart\" (stores)\n• \"Downtown Kingston\" (area)\n• \"Queen's University\" (landmark)\n• \"Kingston General Hospital\" (facility)"
+      }]);
     } catch (e) {
       if (e instanceof BackboardHttpError) {
         setAiChatError(e.message);
@@ -1324,7 +1799,7 @@ export default function App() {
 
               {chatPlaceSuggestions.length > 0 ? (
                 <div className="item" role="listitem">
-                  <div className="itemTitle">{tr('matches')}{chatPendingQuery ? tr('matchesFor', { query: chatPendingQuery }) : ''}</div>
+                  <div className="itemTitle">{chatPendingQuery ? tr('matchesFor', { query: chatPendingQuery }) : tr('matches')}</div>
                   <div style={{ height: 8 }} />
                   <div className="suggestions" role="list" aria-label={tr('destinationMatches')}>
                     {chatPlaceSuggestions.map((sug, idx) => (
@@ -1334,10 +1809,29 @@ export default function App() {
                         className="suggestionButton"
                         role="listitem"
                         onClick={() => {
-                          selectPlace({ lat: sug.lat, lng: sug.lng }, sug.label);
+                          const dest = { lat: sug.lat, lng: sug.lng };
+                          selectPlace(dest, sug.label);
                           setChatPlaceSuggestions([]);
                           setChatPendingQuery(null);
-                          setAiChatMessages((prev) => [...prev, { role: 'assistant', content: tr('selectedSeeResults', { label: sug.label }) }]);
+                          
+                          // Check if parking is within user's walking limit
+                          const nearest = findNearestAccessibleParkingTo(dest, { preferLots: true });
+                          if (userMaxWalkDistance && nearest) {
+                            if (nearest.distanceMeters > userMaxWalkDistance) {
+                              // No parking within walking limit - show warning
+                              setAiChatMessages((prev) => [...prev, { 
+                                role: 'assistant', 
+                                content: `⚠️ Unfortunately, no parking found within your ${userMaxWalkDistance}m walking limit near ${sug.label}.\n\nThe closest accessible parking is ${formatDistance(nearest.distanceMeters)} away. Please see the Results tab for the nearest options.`
+                              }]);
+                            } else {
+                              setAiChatMessages((prev) => [...prev, { 
+                                role: 'assistant', 
+                                content: `✓ Found parking within your ${userMaxWalkDistance}m limit! The nearest accessible parking is ${formatDistance(nearest.distanceMeters)} from ${sug.label}.`
+                              }]);
+                            }
+                          } else {
+                            setAiChatMessages((prev) => [...prev, { role: 'assistant', content: tr('selectedSeeResults', { label: sug.label }) }]);
+                          }
                         }}
                       >
                         {sug.label}
@@ -1404,6 +1898,8 @@ export default function App() {
                   backboardResetThread();
                   setAiChatMessages([]);
                   setAiChatError(null);
+                  setUserMaxWalkDistance(null);
+                  setAiSuggestedParkingLot(null);
                   setStatusMsg(tr('chatReset'));
                 }}
               >
@@ -1472,17 +1968,24 @@ export default function App() {
                   onLoad={(renderer) => {
                     // Clear any previous renderer
                     if (directionsRendererRef.current && directionsRendererRef.current !== renderer) {
-                      directionsRendererRef.current.setDirections(null);
-                      directionsRendererRef.current.setMap(null);
+                      try {
+                        directionsRendererRef.current.setDirections(null);
+                        directionsRendererRef.current.setMap(null);
+                      } catch (e) {
+                        // Ignore cleanup errors
+                      }
                     }
                     directionsRendererRef.current = renderer;
-                    // Ensure directions are set
-                    renderer.setDirections(directions);
+                    // Note: directions are set via the 'directions' prop, no need to call setDirections
                   }}
                   onUnmount={(renderer) => {
                     // Explicitly clear directions when unmounting
-                    renderer.setDirections(null);
-                    renderer.setMap(null);
+                    try {
+                      renderer.setDirections(null);
+                      renderer.setMap(null);
+                    } catch (e) {
+                      // Ignore cleanup errors
+                    }
                     if (directionsRendererRef.current === renderer) {
                       directionsRendererRef.current = null;
                     }

@@ -124,6 +124,8 @@ function isBusyNow(dest) {
 }
 
 let cachedLots = null;
+let cachedAssistantId = null;
+let cachedThreadId = null;
 
 async function loadParkingLots() {
   if (cachedLots) return cachedLots;
@@ -313,6 +315,459 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/ai/recommend-parking') {
+      const body = (await parseBody(req)) ?? {};
+      const userMessage = typeof body.message === 'string' ? body.message.trim() : '';
+      const userLat = typeof body.lat === 'number' ? body.lat : (typeof body.lat === 'string' ? Number.parseFloat(body.lat) : null);
+      const userLng = typeof body.lng === 'number' ? body.lng : (typeof body.lng === 'string' ? Number.parseFloat(body.lng) : null);
+      const llmProvider = typeof body.llm_provider === 'string' ? body.llm_provider : 'google';
+      const modelName = typeof body.model_name === 'string' ? body.model_name : 'gemini-2.5-flash';
+      
+      if (!userMessage) {
+        badRequest(res, 'Missing message');
+        return;
+      }
+
+      try {
+        // Use Backboard AI to understand user intent
+        let intent = {
+          destination: null,
+          area: null,
+          maxWalkDistance: null,
+          preferences: [],
+          intent: '',
+          aiResponse: ''
+        };
+
+        try {
+          // Create or reuse assistant
+          let assistantId = cachedAssistantId;
+          
+          if (!assistantId) {
+            const assistant = await backboardJson('/assistants', 'POST', {
+              name: 'KingstonAccess Parking Assistant',
+              system_prompt: `You are a friendly and helpful parking assistant for Kingston, Ontario. Your job is to help users find accessible parking near their destinations.
+
+IMPORTANT: Always respond in natural, conversational language. Never use JSON, brackets, or any technical formatting in your responses.
+
+When a user mentions a destination:
+- Acknowledge their destination
+- Let them know you're finding parking options nearby
+- Be helpful and friendly
+
+Common destinations in Kingston you should recognize:
+- Metro, Shoppers Drug Mart, Walmart, Loblaws, Costco (stores)
+- Kingston General Hospital (KGH)
+- Queen's University
+- Downtown Kingston
+- Kingston Waterfront
+
+CONTEXT HANDLING:
+Messages may include context in brackets like: [Context: User selected "Metro" as destination. Nearby parking: 1. Armstrong Lot (200m), 2. City Lot (350m). Currently selected: Armstrong Lot.]
+
+When you see this context:
+- You know the user's current destination and parking options
+- If they say a lot is "full" or want the "next" or "second nearest" option, refer to the numbered list
+- Help them navigate to alternative parking options
+- Example: "No problem! The second nearest option is City Lot, about 350m away. Would you like directions there?"
+
+Example responses:
+- User: "I'm going to Metro" → "Great! I'll find accessible parking options near Metro for you."
+- User: "parking near downtown" → "Sure! Let me show you the accessible parking options in downtown Kingston."
+- User: "Hello!" → "Hello! I'm your parking assistant. I can help you find accessible parking in Kingston. Where would you like to go today?"
+- User with context saying lot is full → "No problem! Let me suggest the next closest option for you."
+
+Keep responses concise, friendly, and helpful.`
+            });
+
+            assistantId = assistant?.assistant_id;
+            if (!assistantId) throw new Error('Backboard did not return assistant_id');
+            cachedAssistantId = assistantId;
+          }
+
+          // Reuse existing thread for conversation context, or create new one
+          let threadId = cachedThreadId;
+          if (!threadId) {
+            const thread = await backboardJson(`/assistants/${encodeURIComponent(assistantId)}/threads`, 'POST', {});
+            threadId = thread?.thread_id;
+            if (!threadId) throw new Error('Backboard did not return thread_id');
+            cachedThreadId = threadId;
+          }
+
+          // Send user message to AI
+          const aiResp = await backboardMessage(threadId, {
+            content: userMessage,
+            llm_provider: llmProvider,
+            model_name: modelName,
+            memory: 'off',
+            web_search: 'off',
+            send_to_llm: true
+          });
+
+          const aiText = (aiResp.content ?? '').trim();
+          intent.aiResponse = aiText;
+
+          // IMPORTANT: Extract only the actual user message, not the context
+          // Context format: "[Context: ...]\n\nUser's message: actual message"
+          let actualUserMessage = userMessage;
+          
+          // Check if message has context format
+          if (userMessage.includes('[Context:') && userMessage.includes("User's message:")) {
+            // Extract just the user's actual message
+            const parts = userMessage.split("User's message:");
+            if (parts.length > 1) {
+              actualUserMessage = parts[parts.length - 1].trim();
+            }
+            console.log('DEBUG - Has context, extracted user message:', actualUserMessage);
+          } else {
+            console.log('DEBUG - No context format, using full message');
+          }
+          
+          const userLower = actualUserMessage.toLowerCase();
+          console.log('DEBUG - Checking keywords in:', userLower);
+          
+          // Check for specific destinations in USER's message only
+          if (userLower.includes('metro')) {
+            intent.destination = 'Metro';
+            intent.intent = 'Find parking near Metro';
+          } else if (userLower.includes('shoppers')) {
+            intent.destination = 'Shoppers Drug Mart';
+            intent.intent = 'Find parking near Shoppers Drug Mart';
+          } else if (userLower.includes('walmart')) {
+            intent.destination = 'Walmart';
+            intent.intent = 'Find parking near Walmart';
+          } else if (userLower.includes('loblaws') || userLower.includes('loblaw')) {
+            intent.destination = 'Loblaws';
+            intent.intent = 'Find parking near Loblaws';
+          } else if (userLower.includes('costco')) {
+            intent.destination = 'Costco';
+            intent.intent = 'Find parking near Costco';
+          } else if (userLower.includes('hospital') || userLower.includes('kgh')) {
+            intent.destination = 'Kingston General Hospital';
+            intent.intent = 'Find parking near Kingston General Hospital';
+          }
+          
+          // Check for areas in USER's message only
+          if (!intent.destination) {
+            if (userLower.includes('downtown') || userLower.includes('city centre') || userLower.includes('city center')) {
+              intent.area = 'downtown';
+              intent.intent = 'Find parking in downtown Kingston';
+            } else if (userLower.includes('university') || userLower.includes('queen\'s') || userLower.includes('queens')) {
+              intent.area = 'university';
+              intent.intent = 'Find parking near Queen\'s University';
+            } else if (userLower.includes('waterfront') || userLower.includes('lake') || userLower.includes('harbour') || userLower.includes('harbor')) {
+              intent.area = 'waterfront';
+              intent.intent = 'Find parking near the waterfront';
+            } else if (userLower.includes('cataraqui')) {
+              intent.area = 'cataraqui';
+              intent.intent = 'Find parking in Cataraqui area';
+            }
+          }
+          
+          // Extract walking distance from user message
+          const distMatch = userLower.match(/(\d+)\s*(?:m\b|meter|metre)/);
+          if (distMatch) {
+            intent.maxWalkDistance = Number.parseInt(distMatch[1], 10);
+          }
+          
+          // Parse AI response for parking lot suggestions (when AI succeeded)
+          if (intent.aiResponse && userMessage.includes('[Context:')) {
+            const aiLower = intent.aiResponse.toLowerCase();
+            
+            // Check if AI is suggesting a parking lot
+            if (aiLower.includes('suggest') || aiLower.includes('next') || aiLower.includes('try') || aiLower.includes('would you like')) {
+              // Parse parking options from context
+              const optionsMatch = userMessage.match(/Available parking options[^:]*:\s*([^]]+?)(?:\. User has selected|\])/);
+              if (optionsMatch) {
+                const optionsStr = optionsMatch[1];
+                const lotMatches = optionsStr.matchAll(/\d+\.\s*([^(]+)\s*\(([^)]+)\)/g);
+                const contextLots = [];
+                for (const match of lotMatches) {
+                  contextLots.push({ name: match[1].trim(), distance: match[2].trim() });
+                }
+                
+                // Find which lot AI is suggesting
+                for (const lot of contextLots) {
+                  const lotKey = lot.name.toLowerCase().split(' ')[0]; // e.g., "mckee"
+                  if (aiLower.includes(lotKey)) {
+                    // Check if this is a suggestion (not just mentioning it's full)
+                    const isFullPattern = new RegExp(`${lotKey}[^.]*(?:full|taken|occupied)`, 'i');
+                    if (!isFullPattern.test(aiLower)) {
+                      intent.suggestedParkingLot = lot.name;
+                      console.log('DEBUG - AI response suggests parking lot:', lot.name);
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (aiError) {
+          console.error('Backboard AI error:', aiError.message);
+          // Fallback to local parsing if AI fails
+          // Extract actual user message from context format
+          let fallbackMsg = userMessage;
+          let hasContext = false;
+          let contextParkingOptions = [];
+          let contextDestination = null;
+          let contextSelectedLot = null;
+          
+          if (userMessage.includes('[Context:') && userMessage.includes("User's message:")) {
+            hasContext = true;
+            const parts = userMessage.split("User's message:");
+            if (parts.length > 1) {
+              fallbackMsg = parts[parts.length - 1].trim();
+            }
+            
+            // Parse context for parking options
+            const destMatch = userMessage.match(/destination is "([^"]+)"/);
+            if (destMatch) {
+              contextDestination = destMatch[1];
+            }
+            
+            const selectedMatch = userMessage.match(/User has selected: ([^.]+)/);
+            if (selectedMatch) {
+              contextSelectedLot = selectedMatch[1].trim();
+            }
+            
+            // Parse parking options list
+            const optionsMatch = userMessage.match(/Available parking options[^:]*:\s*([^]]+?)(?:\. User has selected|\])/);
+            if (optionsMatch) {
+              const optionsStr = optionsMatch[1];
+              const lotMatches = optionsStr.matchAll(/\d+\.\s*([^(]+)\s*\(([^)]+)\)/g);
+              for (const match of lotMatches) {
+                contextParkingOptions.push({ name: match[1].trim(), distance: match[2].trim() });
+              }
+            }
+          }
+          
+          const lower = fallbackMsg.toLowerCase();
+          
+          // Detect navigation intent (user wants to go to a specific parking lot)
+          if (hasContext && contextParkingOptions.length > 0) {
+            // Check for navigation phrases
+            const navPatterns = [
+              /(?:go to|navigate to|take me to|let'?s go to|head to|try|use)\s+(.+)/i,
+              /(.+?)(?:\s+please|\s+lot)?$/i  // Just the lot name
+            ];
+            
+            for (const pattern of navPatterns) {
+              const navMatch = lower.match(pattern);
+              if (navMatch) {
+                const targetName = navMatch[1].trim();
+                // Find matching parking lot
+                const matchedLot = contextParkingOptions.find(p => {
+                  const lotLower = p.name.toLowerCase();
+                  const firstWord = lotLower.split(' ')[0];
+                  return lotLower.includes(targetName) || targetName.includes(firstWord);
+                });
+                
+                if (matchedLot) {
+                  intent.navigateTo = matchedLot.name;
+                  intent.aiResponse = `Great! Navigating to ${contextDestination} via ${matchedLot.name}. The route is now displayed on the map!`;
+                  console.log('DEBUG - Detected navigation intent to:', matchedLot.name);
+                  break;
+                }
+              }
+            }
+          }
+          
+          // Smart handling when user has context and mentions a lot is full/taken
+          if (!intent.navigateTo && hasContext && contextParkingOptions.length > 1 && (lower.includes('full') || lower.includes('taken') || lower.includes('no space') || lower.includes('occupied'))) {
+            // Find which lot they mentioned
+            let mentionedLotIndex = -1;
+            for (let i = 0; i < contextParkingOptions.length; i++) {
+              const lotName = contextParkingOptions[i].name.toLowerCase();
+              const firstWord = lotName.split(' ')[0];
+              if (lower.includes(firstWord)) {
+                mentionedLotIndex = i;
+                break;
+              }
+            }
+            
+            // If they didn't specify which lot, assume the selected one
+            if (mentionedLotIndex === -1 && contextSelectedLot) {
+              mentionedLotIndex = contextParkingOptions.findIndex(p => 
+                p.name.toLowerCase() === contextSelectedLot.toLowerCase()
+              );
+            }
+            
+            if (mentionedLotIndex >= 0 && mentionedLotIndex < contextParkingOptions.length - 1) {
+              const fullLot = contextParkingOptions[mentionedLotIndex];
+              const nextLot = contextParkingOptions[mentionedLotIndex + 1];
+              intent.aiResponse = `No problem! Since ${fullLot.name} is full, I suggest trying ${nextLot.name}, which is ${nextLot.distance} away. Would you like to navigate there?`;
+              intent.suggestedParkingLot = nextLot.name;
+              console.log('DEBUG - Generated local response for full lot:', fullLot.name, '-> suggesting:', nextLot.name);
+            }
+          }
+          
+          // Standard keyword detection if no smart handling applied
+          if (!intent.aiResponse) {
+            if (lower.includes('metro')) {
+              intent.destination = 'Metro';
+              intent.intent = 'Find parking near Metro';
+            } else if (lower.includes('shoppers')) {
+              intent.destination = 'Shoppers Drug Mart';
+              intent.intent = 'Find parking near Shoppers Drug Mart';
+            } else if (lower.includes('walmart')) {
+              intent.destination = 'Walmart';
+              intent.intent = 'Find parking near Walmart';
+            } else if (lower.includes('downtown')) {
+              intent.area = 'downtown';
+              intent.intent = 'Find parking in downtown Kingston';
+            } else if (lower.includes('university') || lower.includes('queen')) {
+              intent.area = 'university';
+              intent.intent = 'Find parking near Queen\'s University';
+            } else if (hasContext && contextDestination) {
+              // User has context but said something we don't understand
+              // Return parking options list as helpful response
+              const optionsList = contextParkingOptions.slice(0, 3).map((p, i) => `${i + 1}. ${p.name} (${p.distance})`).join('\n');
+              intent.aiResponse = `I'm having trouble understanding that, but I can still help! You're heading to ${contextDestination}. Here are the available parking options:\n\n${optionsList}\n\nWhich one would you like to try?`;
+            }
+          }
+        }
+
+        // Extract walking distance from actual user message if not set by AI
+        if (!intent.maxWalkDistance) {
+          let distMsg = userMessage;
+          if (userMessage.includes('[Context:') && userMessage.includes("User's message:")) {
+            const parts = userMessage.split("User's message:");
+            if (parts.length > 1) {
+              distMsg = parts[parts.length - 1].trim();
+            }
+          }
+          const distanceMatch = distMsg.toLowerCase().match(/(\d+)\s*(?:m\b|meter|metre)/);
+          if (distanceMatch) {
+            intent.maxWalkDistance = Number.parseInt(distanceMatch[1], 10);
+          }
+        }
+
+        // If no specific intent extracted, use a generic one
+        if (!intent.intent && !intent.aiResponse) {
+          intent.intent = 'Find accessible parking nearby';
+        }
+
+        // Load parking lots
+        const lots = await loadParkingLots();
+        
+        // Common places and areas in Kingston (verified coordinates)
+        const commonPlaces = {
+          'metro': { lat: 44.2396, lng: -76.4893, label: 'Metro (Barrie St)' }, // Metro on Barrie Street
+          'shoppers': { lat: 44.2312, lng: -76.4860, label: 'Shoppers Drug Mart' }, // Downtown Kingston
+          'walmart': { lat: 44.2635, lng: -76.5456, label: 'Walmart' }, // Cataraqui area
+          'loblaws': { lat: 44.2630, lng: -76.5400, label: 'Loblaws' }, // Cataraqui Centre
+          'costco': { lat: 44.2650, lng: -76.5520, label: 'Costco' }, // Cataraqui area
+          'kingston general hospital': { lat: 44.2270, lng: -76.4930, label: 'Kingston General Hospital' },
+          'kgh': { lat: 44.2270, lng: -76.4930, label: 'Kingston General Hospital' }
+        };
+
+        const areaLocations = {
+          'downtown': { lat: 44.2312, lng: -76.4860, label: 'Downtown Kingston' },
+          'university': { lat: 44.2250, lng: -76.4950, label: 'Queen\'s University' },
+          'waterfront': { lat: 44.2290, lng: -76.4800, label: 'Kingston Waterfront' },
+          'cataraqui': { lat: 44.2630, lng: -76.5400, label: 'Cataraqui' }
+        };
+        
+        // Determine destination (the place user wants to go to)
+        let destination = null;
+        let destinationLabel = null;
+        
+        // Priority 1: Specific destination (e.g., "Metro", "Shoppers")
+        if (intent.destination) {
+          const destLower = intent.destination.toLowerCase();
+          for (const [key, place] of Object.entries(commonPlaces)) {
+            if (destLower.includes(key)) {
+              destination = { lat: place.lat, lng: place.lng };
+              destinationLabel = place.label;
+              break;
+            }
+          }
+        }
+        
+        // Priority 2: Area-based destination (e.g., "downtown", "university")
+        if (!destination && intent.area) {
+          const area = areaLocations[intent.area];
+          if (area) {
+            destination = { lat: area.lat, lng: area.lng };
+            destinationLabel = area.label;
+          }
+        }
+
+        // Debug: log what we extracted
+        console.log('DEBUG - intent.destination:', intent.destination, 'intent.area:', intent.area);
+        
+        // If no destination/area found, this is a conversational message
+        if (!intent.destination && !intent.area) {
+          // Return AI response if available, or a helpful prompt
+          const conversationResponse = intent.aiResponse || 
+            "Hello! I'm your parking assistant. I can help you find accessible parking in Kingston. Where would you like to go today? You can say things like 'Metro', 'Shoppers', or 'downtown Kingston'.";
+          
+          console.log('DEBUG - Returning conversation response:', conversationResponse.substring(0, 50) + '...');
+          json(res, 200, {
+            recommendations: [],
+            suggestedParkingLot: intent.suggestedParkingLot || null,
+            navigateTo: intent.navigateTo || null,
+            intent: intent,
+            aiResponse: conversationResponse,
+            isConversation: true
+          });
+          return;
+        }
+        
+        console.log('DEBUG - Proceeding to find parking (destination or area found)');
+
+        // Default to downtown Kingston if destination name matched but coords not found
+        if (!destination) {
+          destination = { lat: 44.2312, lng: -76.4860 };
+          destinationLabel = intent.destination || intent.area || 'Downtown Kingston';
+        }
+        
+        // Search center for finding parking is the destination (where user wants to go)
+        const searchCenter = destination;
+
+        // Calculate distances and filter
+        const userMaxWalk = intent.maxWalkDistance;
+        // Minimum search radius of 1km, or 5x user's max walk distance, whichever is larger
+        const searchRadius = Math.max(1000, (userMaxWalk ?? 500) * 5);
+        
+        const allWithDistance = lots
+          .map((lot) => ({
+            ...lot,
+            distanceMeters: haversineMeters(searchCenter, { lat: lot.lat, lng: lot.lng })
+          }))
+          .filter((lot) => lot.distanceMeters <= searchRadius)
+          .sort((a, b) => a.distanceMeters - b.distanceMeters);
+        
+        const candidates = allWithDistance.slice(0, 10); // Top 10 candidates, sorted by distance
+        
+        // Check if any options are within user's max walk distance
+        let withinWalkDistance = 0;
+        let closestDistance = null;
+        if (userMaxWalk && candidates.length > 0) {
+          withinWalkDistance = candidates.filter(c => c.distanceMeters <= userMaxWalk).length;
+          closestDistance = Math.round(candidates[0].distanceMeters);
+        }
+
+        json(res, 200, {
+          recommendations: candidates,
+          intent: intent,
+          searchCenter: searchCenter,
+          destination: destination,
+          destinationLabel: destinationLabel,
+          aiResponse: intent.aiResponse || null,
+          userMaxWalk: userMaxWalk,
+          withinWalkDistance: withinWalkDistance,
+          closestDistance: closestDistance
+        });
+        return;
+      } catch (e) {
+        const status = typeof e?.status === 'number' ? e.status : 500;
+        const message = e instanceof Error ? e.message : 'Server error';
+        json(res, status, { error: message });
+        return;
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/ai/message') {
       const body = (await parseBody(req)) ?? {};
       const threadId = typeof body.thread_id === 'string' ? body.thread_id.trim() : '';
@@ -334,6 +789,14 @@ const server = createServer(async (req, res) => {
 
       const resp = await backboardMessage(threadId, { content, llm_provider, model_name, memory, web_search, send_to_llm });
       json(res, 200, resp);
+      return;
+    }
+
+    // Reset conversation thread (for "New Chat" button)
+    if (req.method === 'POST' && url.pathname === '/api/ai/reset-thread') {
+      cachedThreadId = null;
+      cachedAssistantId = null; // Also reset assistant to get fresh system prompt
+      json(res, 200, { success: true, message: 'Thread reset' });
       return;
     }
 
