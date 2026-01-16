@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">KingstonAccess</string>
+    <string name="google_maps_key">AIzaSyCx4fpz0MJ5b0Q3TLO66CyQcRghH4oKUpQ</string>
+    <string name="backend_base_url">http://10.0.2.2:8000</string>
+    <string name="search_hint">Rechercher des parkings</string>
+    <string name="search_location_hint">Rechercher un lieu à Kingston</string>
+    <string name="search">Rechercher</string>
+    <string name="ai_search">Recherche IA</string>
+    <string name="select_address">Sélectionner une adresse</string>
+    <string name="close">Fermer</string>
+    <string name="open_map">Ouvrir la carte</string>
+    <string name="loading">Chargement…</string>
+    <string name="error_loading">Échec du chargement : %1$s</string>
+    <string name="unknown">Inconnu</string>
+    <string name="handicap_spaces">Places accessibles : %1$s</string>
+    <string name="capacity">Capacité : %1$s</string>
+    <string name="ownership">Propriété : %1$s</string>
+    <string name="details">Détails</string>
+    <string name="back">Retour</string>
+    <string name="control_type">Type de contrôle : %1$s</string>
+    <string name="coordinates">Coordonnées : %1$s, %2$s</string>
+    <string name="map_title">Carte</string>
+    <string name="map_placeholder_title">La vue de la carte n’est pas encore activée.</string>
+    <string name="map_placeholder_body">Ceci est un écran UI provisoire. Le backend et le SDK cartographique seront intégrés à la prochaine étape.</string>
+    <string name="settings">Paramètres</string>
+    <string name="language">Langue</string>
+    <string name="follow_system">Suivre le système</string>
+    <string name="english">English</string>
+    <string name="chinese">中文</string>
+    <string name="french">Français</string>
+    <string name="nearby_accessible_parking">Stationnement accessible à proximité</string>
+    <string name="availability_probability">Disponibilité : %1$s</string>
+    <string name="no_results">Aucun résultat</string>
+    <string name="geocode_failed">Lieu introuvable. Essayez une autre recherche.</string>
+    <string name="maps_key_missing">Clé Google Maps non configurée. Ajoutez une clé API pour activer la carte.</string>
+</resources>

@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">KingstonAccess</string>
+    <string name="google_maps_key">AIzaSyCx4fpz0MJ5b0Q3TLO66CyQcRghH4oKUpQ</string>
+    <string name="backend_base_url">http://10.0.2.2:8000</string>
+    <string name="search_hint">Search parking lots</string>
+    <string name="search_location_hint">Search a place in Kingston</string>
+    <string name="search">Search</string>
+    <string name="ai_search">AI Search</string>
+    <string name="select_address">Select an address</string>
+    <string name="close">Close</string>
+    <string name="open_map">Open map</string>
+    <string name="loading">Loading…</string>
+    <string name="error_loading">Failed to load: %1$s</string>
+    <string name="unknown">Unknown</string>
+    <string name="handicap_spaces">Accessible spaces: %1$s</string>
+    <string name="capacity">Capacity: %1$s</string>
+    <string name="ownership">Ownership: %1$s</string>
+    <string name="details">Details</string>
+    <string name="back">Back</string>
+    <string name="control_type">Control type: %1$s</string>
+    <string name="coordinates">Coordinates: %1$s, %2$s</string>
+    <string name="map_title">Map</string>
+    <string name="map_placeholder_title">Map view is not enabled yet.</string>
+    <string name="map_placeholder_body">This is a UI placeholder. The backend and map SDK will be integrated in the next phase.</string>
+    <string name="settings">Settings</string>
+    <string name="language">Language</string>
+    <string name="follow_system">Follow system</string>
+    <string name="english">English</string>
+    <string name="chinese">中文</string>
+    <string name="french">Français</string>
+    <string name="nearby_accessible_parking">Nearby accessible parking</string>
+    <string name="availability_probability">Availability: %1$s</string>
+    <string name="no_results">No results</string>
+    <string name="geocode_failed">Could not find that place. Try a different query.</string>
+    <string name="maps_key_missing">Google Maps key is not set. Add an API key to run the map.</string>
+</resources>

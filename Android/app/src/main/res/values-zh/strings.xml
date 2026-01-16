@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">KingstonAccess</string>
+    <string name="google_maps_key">AIzaSyCx4fpz0MJ5b0Q3TLO66CyQcRghH4oKUpQ</string>
+    <string name="backend_base_url">http://10.0.2.2:8000</string>
+    <string name="search_hint">搜索停车场</string>
+    <string name="search_location_hint">在 Kingston 搜索地点</string>
+    <string name="search">搜索</string>
+    <string name="ai_search">AI 搜索</string>
+    <string name="select_address">请选择地址</string>
+    <string name="close">关闭</string>
+    <string name="open_map">打开地图</string>
+    <string name="loading">加载中…</string>
+    <string name="error_loading">加载失败：%1$s</string>
+    <string name="unknown">未知</string>
+    <string name="handicap_spaces">无障碍车位：%1$s</string>
+    <string name="capacity">总容量：%1$s</string>
+    <string name="ownership">归属：%1$s</string>
+    <string name="details">详情</string>
+    <string name="back">返回</string>
+    <string name="control_type">管理类型：%1$s</string>
+    <string name="coordinates">坐标：%1$s，%2$s</string>
+    <string name="map_title">地图</string>
+    <string name="map_placeholder_title">地图功能尚未启用。</string>
+    <string name="map_placeholder_body">此页面为 UI 占位。下一阶段将接入后端与地图 SDK。</string>
+    <string name="settings">设置</string>
+    <string name="language">语言</string>
+    <string name="follow_system">跟随系统</string>
+    <string name="english">English</string>
+    <string name="chinese">中文</string>
+    <string name="french">Français</string>
+    <string name="nearby_accessible_parking">附近无障碍停车场</string>
+    <string name="availability_probability">可用概率：%1$s</string>
+    <string name="no_results">暂无结果</string>
+    <string name="geocode_failed">未找到该地点，请尝试其他关键词。</string>
+    <string name="maps_key_missing">未配置 Google Maps Key，请添加 API Key 以启用地图。</string>
+</resources>
