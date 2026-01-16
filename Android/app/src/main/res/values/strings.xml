@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">KingstonAccess</string>
-    <string name="google_maps_key">AIzaSyCx4fpz0MJ5b0Q3TLO66CyQcRghH4oKUpQ</string>
+    <string name="google_maps_key">YOUR_GOOGLE_MAPS_API_KEY</string>
     <string name="backend_base_url">http://10.0.2.2:8000</string>
     <string name="search_hint">Search parking lots</string>
     <string name="search_location_hint">Search a place in Kingston</string>
